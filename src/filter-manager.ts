@@ -3,6 +3,8 @@
  * Provides comprehensive filter management functionality
  */
 
+import { withTimeout, DEFAULT_TIMEOUT_MS } from "./timeout.js";
+
 // Type definitions for Gmail API filters
 export interface GmailFilterCriteria {
     from?: string;
@@ -42,10 +44,10 @@ export async function createFilter(gmail: any, criteria: GmailFilterCriteria, ac
             action
         };
 
-        const response = await gmail.users.settings.filters.create({
+        const response = await withTimeout(gmail.users.settings.filters.create({
             userId: 'me',
             requestBody: filterBody,
-        });
+        }), DEFAULT_TIMEOUT_MS, 'filters.create');
 
         return response.data;
     } catch (error: any) {
@@ -63,9 +65,9 @@ export async function createFilter(gmail: any, criteria: GmailFilterCriteria, ac
  */
 export async function listFilters(gmail: any) {
     try {
-        const response = await gmail.users.settings.filters.list({
+        const response = await withTimeout(gmail.users.settings.filters.list({
             userId: 'me',
-        });
+        }), DEFAULT_TIMEOUT_MS, 'filters.list');
 
         const filters = response.data.filter || [];
         
@@ -86,10 +88,10 @@ export async function listFilters(gmail: any) {
  */
 export async function getFilter(gmail: any, filterId: string) {
     try {
-        const response = await gmail.users.settings.filters.get({
+        const response = await withTimeout(gmail.users.settings.filters.get({
             userId: 'me',
             id: filterId,
-        });
+        }), DEFAULT_TIMEOUT_MS, 'filters.get');
 
         return response.data;
     } catch (error: any) {
@@ -108,10 +110,10 @@ export async function getFilter(gmail: any, filterId: string) {
  */
 export async function deleteFilter(gmail: any, filterId: string) {
     try {
-        await gmail.users.settings.filters.delete({
+        await withTimeout(gmail.users.settings.filters.delete({
             userId: 'me',
             id: filterId,
-        });
+        }), DEFAULT_TIMEOUT_MS, 'filters.delete');
 
         return { success: true, message: `Filter "${filterId}" deleted successfully.` };
     } catch (error: any) {

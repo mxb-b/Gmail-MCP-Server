@@ -3,6 +3,8 @@
  * Provides comprehensive label management functionality
  */
 
+import { withTimeout, DEFAULT_TIMEOUT_MS } from "./timeout.js";
+
 // Type definitions for Gmail API labels
 export interface GmailLabel {
     id: string;
@@ -34,14 +36,14 @@ export async function createLabel(gmail: any, labelName: string, options: {
         const messageListVisibility = options.messageListVisibility || 'show';
         const labelListVisibility = options.labelListVisibility || 'labelShow';
 
-        const response = await gmail.users.labels.create({
+        const response = await withTimeout(gmail.users.labels.create({
             userId: 'me',
             requestBody: {
                 name: labelName,
                 messageListVisibility,
                 labelListVisibility,
             },
-        });
+        }), DEFAULT_TIMEOUT_MS, 'labels.create');
 
         return response.data;
     } catch (error: any) {
@@ -68,16 +70,16 @@ export async function updateLabel(gmail: any, labelId: string, updates: {
 }) {
     try {
         // Verify the label exists before updating
-        await gmail.users.labels.get({
+        await withTimeout(gmail.users.labels.get({
             userId: 'me',
             id: labelId,
-        });
+        }), DEFAULT_TIMEOUT_MS, 'labels.get verify');
 
-        const response = await gmail.users.labels.update({
+        const response = await withTimeout(gmail.users.labels.update({
             userId: 'me',
             id: labelId,
             requestBody: updates,
-        });
+        }), DEFAULT_TIMEOUT_MS, 'labels.update');
 
         return response.data;
     } catch (error: any) {
@@ -98,19 +100,19 @@ export async function updateLabel(gmail: any, labelId: string, updates: {
 export async function deleteLabel(gmail: any, labelId: string) {
     try {
         // Ensure we're not trying to delete system labels
-        const label = await gmail.users.labels.get({
+        const label = await withTimeout(gmail.users.labels.get({
             userId: 'me',
             id: labelId,
-        });
-        
+        }), DEFAULT_TIMEOUT_MS, 'labels.get delete check');
+
         if (label.data.type === 'system') {
             throw new Error(`Cannot delete system label with ID "${labelId}".`);
         }
-        
-        await gmail.users.labels.delete({
+
+        await withTimeout(gmail.users.labels.delete({
             userId: 'me',
             id: labelId,
-        });
+        }), DEFAULT_TIMEOUT_MS, 'labels.delete');
 
         return { success: true, message: `Label "${label.data.name}" deleted successfully.` };
     } catch (error: any) {
@@ -129,9 +131,9 @@ export async function deleteLabel(gmail: any, labelId: string) {
  */
 export async function listLabels(gmail: any) {
     try {
-        const response = await gmail.users.labels.list({
+        const response = await withTimeout(gmail.users.labels.list({
             userId: 'me',
-        });
+        }), DEFAULT_TIMEOUT_MS, 'labels.list');
 
         const labels = response.data.labels || [];
         

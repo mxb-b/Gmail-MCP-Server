@@ -21,6 +21,7 @@ import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
 import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
+import { withTimeout, DEFAULT_TIMEOUT_MS } from "./timeout.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -329,12 +330,12 @@ async function main() {
                 // Auto-resolve threading headers when threadId is provided but inReplyTo is missing
                 if (validatedArgs.threadId && !validatedArgs.inReplyTo) {
                     try {
-                        const threadResponse = await gmail.users.threads.get({
+                        const threadResponse = await withTimeout(gmail.users.threads.get({
                             userId: 'me',
                             id: validatedArgs.threadId,
                             format: 'metadata',
                             metadataHeaders: ['Message-ID'],
-                        });
+                        }), DEFAULT_TIMEOUT_MS, 'threads.get for header resolution');
 
                         const threadMessages = threadResponse.data.messages || [];
                         if (threadMessages.length > 0) {
@@ -381,13 +382,13 @@ async function main() {
                             .replace(/\//g, '_')
                             .replace(/=+$/, '');
 
-                        const result = await gmail.users.messages.send({
+                        const result = await withTimeout(gmail.users.messages.send({
                             userId: 'me',
                             requestBody: {
                                 raw: encodedMessage,
                                 ...(validatedArgs.threadId && { threadId: validatedArgs.threadId })
                             }
-                        });
+                        }), DEFAULT_TIMEOUT_MS, 'messages.send with attachments');
                         
                         return {
                             content: [
@@ -409,12 +410,12 @@ async function main() {
                             ...(validatedArgs.threadId && { threadId: validatedArgs.threadId })
                         };
                         
-                        const response = await gmail.users.drafts.create({
+                        const response = await withTimeout(gmail.users.drafts.create({
                             userId: 'me',
                             requestBody: {
                                 message: messageRequest,
                             },
-                        });
+                        }), DEFAULT_TIMEOUT_MS, 'drafts.create with attachments');
                         return {
                             content: [
                                 {
@@ -449,10 +450,10 @@ async function main() {
                     }
 
                     if (action === "send") {
-                        const response = await gmail.users.messages.send({
+                        const response = await withTimeout(gmail.users.messages.send({
                             userId: 'me',
                             requestBody: messageRequest,
-                        });
+                        }), DEFAULT_TIMEOUT_MS, 'messages.send');
                         return {
                             content: [
                                 {
@@ -462,12 +463,12 @@ async function main() {
                             ],
                         };
                     } else {
-                        const response = await gmail.users.drafts.create({
+                        const response = await withTimeout(gmail.users.drafts.create({
                             userId: 'me',
                             requestBody: {
                                 message: messageRequest,
                         },
-                        });
+                        }), DEFAULT_TIMEOUT_MS, 'drafts.create');
                         return {
                             content: [
                                 {
@@ -529,11 +530,11 @@ async function main() {
 
                 case "read_email": {
                     const validatedArgs = ReadEmailSchema.parse(args);
-                    const response = await gmail.users.messages.get({
+                    const response = await withTimeout(gmail.users.messages.get({
                         userId: 'me',
                         id: validatedArgs.messageId,
                         format: 'full',
-                    });
+                    }), DEFAULT_TIMEOUT_MS, 'messages.get read_email');
 
                     const { subject, from, to, date, rfcMessageId } = extractHeaders(response.data.payload);
                     const threadId = response.data.threadId || '';
@@ -562,21 +563,21 @@ async function main() {
 
                 case "search_emails": {
                     const validatedArgs = SearchEmailsSchema.parse(args);
-                    const response = await gmail.users.messages.list({
+                    const response = await withTimeout(gmail.users.messages.list({
                         userId: 'me',
                         q: validatedArgs.query,
                         maxResults: validatedArgs.maxResults || 10,
-                    });
+                    }), DEFAULT_TIMEOUT_MS, 'messages.list search');
 
                     const messages = response.data.messages || [];
                     const results = await Promise.all(
                         messages.map(async (msg) => {
-                            const detail = await gmail.users.messages.get({
+                            const detail = await withTimeout(gmail.users.messages.get({
                                 userId: 'me',
                                 id: msg.id!,
                                 format: 'metadata',
                                 metadataHeaders: ['Subject', 'From', 'Date'],
-                            });
+                            }), DEFAULT_TIMEOUT_MS, `messages.get metadata ${msg.id}`);
                             const headers = detail.data.payload?.headers || [];
                             return {
                                 id: msg.id,
@@ -610,11 +611,11 @@ async function main() {
                         }
 
                         // Always fetch full message for metadata (needed for attachments list)
-                        const fullResponse = await gmail.users.messages.get({
+                        const fullResponse = await withTimeout(gmail.users.messages.get({
                             userId: "me",
                             id: messageId,
                             format: "full",
-                        });
+                        }), DEFAULT_TIMEOUT_MS, 'messages.get download full');
 
                         const { subject, from, date } = extractHeaders(fullResponse.data.payload);
                         const attachments = extractAttachments(fullResponse.data.payload as GmailMessagePart);
@@ -623,11 +624,11 @@ async function main() {
 
                         if (format === "eml") {
                             // For EML format, fetch raw RFC822 message
-                            const rawResponse = await gmail.users.messages.get({
+                            const rawResponse = await withTimeout(gmail.users.messages.get({
                                 userId: "me",
                                 id: messageId,
                                 format: "raw",
-                            });
+                            }), DEFAULT_TIMEOUT_MS, 'messages.get download raw');
                             content = Buffer.from(rawResponse.data.raw || "", "base64url").toString("utf-8");
                         } else {
                             // Extract email content for json/txt/html
@@ -701,11 +702,11 @@ async function main() {
                         requestBody.removeLabelIds = validatedArgs.removeLabelIds;
                     }
                     
-                    await gmail.users.messages.modify({
+                    await withTimeout(gmail.users.messages.modify({
                         userId: 'me',
                         id: validatedArgs.messageId,
                         requestBody: requestBody,
-                    });
+                    }), DEFAULT_TIMEOUT_MS, 'messages.modify');
 
                     return {
                         content: [
@@ -719,10 +720,10 @@ async function main() {
 
                 case "delete_email": {
                     const validatedArgs = DeleteEmailSchema.parse(args);
-                    await gmail.users.messages.delete({
+                    await withTimeout(gmail.users.messages.delete({
                         userId: 'me',
                         id: validatedArgs.messageId,
-                    });
+                    }), DEFAULT_TIMEOUT_MS, 'messages.delete');
 
                     return {
                         content: [
@@ -776,11 +777,11 @@ async function main() {
                         async (batch) => {
                             const results = await Promise.all(
                                 batch.map(async (messageId) => {
-                                    const result = await gmail.users.messages.modify({
+                                    const result = await withTimeout(gmail.users.messages.modify({
                                         userId: 'me',
                                         id: messageId,
                                         requestBody: requestBody,
-                                    });
+                                    }), DEFAULT_TIMEOUT_MS, `batch messages.modify ${messageId}`);
                                     return { messageId, success: true };
                                 })
                             );
@@ -823,10 +824,10 @@ async function main() {
                         async (batch) => {
                             const results = await Promise.all(
                                 batch.map(async (messageId) => {
-                                    await gmail.users.messages.delete({
+                                    await withTimeout(gmail.users.messages.delete({
                                         userId: 'me',
                                         id: messageId,
-                                    });
+                                    }), DEFAULT_TIMEOUT_MS, `batch messages.delete ${messageId}`);
                                     return { messageId, success: true };
                                 })
                             );
@@ -1085,11 +1086,11 @@ async function main() {
 
                     try {
                         // Get the attachment data from Gmail API
-                        const attachmentResponse = await gmail.users.messages.attachments.get({
+                        const attachmentResponse = await withTimeout(gmail.users.messages.attachments.get({
                             userId: 'me',
                             messageId: validatedArgs.messageId,
                             id: validatedArgs.attachmentId,
-                        });
+                        }), 60_000, 'attachments.get');
 
                         if (!attachmentResponse.data.data) {
                             throw new Error('No attachment data received');
@@ -1105,11 +1106,11 @@ async function main() {
 
                         if (!filename) {
                             // Get original filename from message if not provided
-                            const messageResponse = await gmail.users.messages.get({
+                            const messageResponse = await withTimeout(gmail.users.messages.get({
                                 userId: 'me',
                                 id: validatedArgs.messageId,
                                 format: 'full',
-                            });
+                            }), DEFAULT_TIMEOUT_MS, 'messages.get attachment filename');
 
                             // Find the attachment part to get original filename
                             const findAttachment = (part: any): string | null => {
@@ -1166,11 +1167,11 @@ async function main() {
 
                 case "get_thread": {
                     const validatedArgs = GetThreadSchema.parse(args);
-                    const threadResponse = await gmail.users.threads.get({
+                    const threadResponse = await withTimeout(gmail.users.threads.get({
                         userId: 'me',
                         id: validatedArgs.threadId,
                         format: validatedArgs.format || 'full',
-                    });
+                    }), DEFAULT_TIMEOUT_MS, 'threads.get');
 
                     const threadMessages = threadResponse.data.messages || [];
 
@@ -1246,23 +1247,23 @@ async function main() {
 
                 case "list_inbox_threads": {
                     const validatedArgs = ListInboxThreadsSchema.parse(args);
-                    const threadsResponse = await gmail.users.threads.list({
+                    const threadsResponse = await withTimeout(gmail.users.threads.list({
                         userId: 'me',
                         q: validatedArgs.query || 'in:inbox',
                         maxResults: validatedArgs.maxResults || 50,
-                    });
+                    }), DEFAULT_TIMEOUT_MS, 'threads.list inbox');
 
                     const threads = threadsResponse.data.threads || [];
 
                     // Fetch metadata for each thread to get message count and latest message info
                     const threadDetails = await Promise.all(
                         threads.map(async (thread) => {
-                            const detail = await gmail.users.threads.get({
+                            const detail = await withTimeout(gmail.users.threads.get({
                                 userId: 'me',
                                 id: thread.id!,
                                 format: 'metadata',
                                 metadataHeaders: ['Subject', 'From', 'Date'],
-                            });
+                            }), DEFAULT_TIMEOUT_MS, `threads.get metadata ${thread.id}`);
 
                             const messages = detail.data.messages || [];
                             const latestMessage = messages[messages.length - 1];
@@ -1297,11 +1298,11 @@ async function main() {
 
                 case "get_inbox_with_threads": {
                     const validatedArgs = GetInboxWithThreadsSchema.parse(args);
-                    const threadsResponse = await gmail.users.threads.list({
+                    const threadsResponse = await withTimeout(gmail.users.threads.list({
                         userId: 'me',
                         q: validatedArgs.query || 'in:inbox',
                         maxResults: validatedArgs.maxResults || 50,
-                    });
+                    }), DEFAULT_TIMEOUT_MS, 'threads.list get_inbox');
 
                     const threads = threadsResponse.data.threads || [];
 
@@ -1309,12 +1310,12 @@ async function main() {
                         // Return basic thread list without expansion (same as list_inbox_threads)
                         const threadSummaries = await Promise.all(
                             threads.map(async (thread) => {
-                                const detail = await gmail.users.threads.get({
+                                const detail = await withTimeout(gmail.users.threads.get({
                                     userId: 'me',
                                     id: thread.id!,
                                     format: 'metadata',
                                     metadataHeaders: ['Subject', 'From', 'Date'],
-                                });
+                                }), DEFAULT_TIMEOUT_MS, `threads.get summary ${thread.id}`);
 
                                 const messages = detail.data.messages || [];
                                 const latestMessage = messages[messages.length - 1];
@@ -1350,11 +1351,11 @@ async function main() {
                     // Expand each thread with full message content (parallel fetch)
                     const expandedThreads = await Promise.all(
                         threads.map(async (thread) => {
-                            const threadDetail = await gmail.users.threads.get({
+                            const threadDetail = await withTimeout(gmail.users.threads.get({
                                 userId: 'me',
                                 id: thread.id!,
                                 format: 'full',
-                            });
+                            }), DEFAULT_TIMEOUT_MS, `threads.get expand ${thread.id}`);
 
                             const threadMessages = threadDetail.data.messages || [];
 
@@ -1434,11 +1435,11 @@ async function main() {
                     const validatedArgs = ReplyAllSchema.parse(args);
 
                     // Fetch the original email to get headers
-                    const originalEmail = await gmail.users.messages.get({
+                    const originalEmail = await withTimeout(gmail.users.messages.get({
                         userId: 'me',
                         id: validatedArgs.messageId,
                         format: 'full',
-                    });
+                    }), DEFAULT_TIMEOUT_MS, 'messages.get reply_all');
 
                     const headers = originalEmail.data.payload?.headers || [];
                     const threadId = originalEmail.data.threadId || '';
@@ -1452,7 +1453,7 @@ async function main() {
                     const originalReferences = headers.find(h => h.name?.toLowerCase() === 'references')?.value || '';
 
                     // Get authenticated user's email to exclude from recipients
-                    const profile = await gmail.users.getProfile({ userId: 'me' });
+                    const profile = await withTimeout(gmail.users.getProfile({ userId: 'me' }), DEFAULT_TIMEOUT_MS, 'getProfile');
                     const myEmail = profile.data.emailAddress?.toLowerCase() || '';
 
                     // Build recipient list using helper functions
