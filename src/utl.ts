@@ -17,21 +17,77 @@ function encodeEmailHeader(text: string): string {
 }
 
 /**
- * Build a plain-text quoted reply block.
- * Format: "On {date}, {from} wrote:\n> line1\n> line2..."
+ * Format an RFC 2822 date string to Gmail's quote attribution format in Eastern time.
+ * Input:  "Tue, 7 Apr 2026 13:37:52 -0400" (or similar RFC 2822)
+ * Output: "Tue, Apr 7, 2026 at 1:37 PM"
  */
-export function buildPlainTextQuote(from: string, date: string, body: string): string {
-    const quoted = body.split('\n').map(line => `> ${line}`).join('\n');
-    return `\n\nOn ${date}, ${from} wrote:\n${quoted}`;
+export function formatQuoteDate(dateStr: string): string {
+    try {
+        const d = new Date(dateStr);
+        if (isNaN(d.getTime())) return dateStr;
+
+        // Format in America/New_York (Eastern time)
+        const parts = new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            weekday: 'short',
+            month: 'short',
+            day: 'numeric',
+            year: 'numeric',
+            hour: 'numeric',
+            minute: '2-digit',
+            hour12: true,
+        }).formatToParts(d);
+
+        const get = (type: string) => parts.find(p => p.type === type)?.value || '';
+        // Gmail format: "On Tue, Apr 7, 2026 at 10:14 AM"
+        return `${get('weekday')}, ${get('month')} ${get('day')}, ${get('year')} at ${get('hour')}:${get('minute')}\u202F${get('dayPeriod')}`;
+    } catch {
+        return dateStr;
+    }
 }
 
 /**
- * Build an HTML quoted reply block with Gmail-style blockquote styling.
+ * Escape a string for safe use in HTML attributes/content.
+ */
+function escapeHtml(str: string): string {
+    return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+/**
+ * Extract just the email address from a "Name <email>" formatted string.
+ */
+function extractEmail(from: string): { name: string; email: string } {
+    const match = from.match(/^(.+?)\s*<([^>]+)>$/);
+    if (match) return { name: match[1].trim(), email: match[2].trim() };
+    return { name: from, email: from };
+}
+
+/**
+ * Build a plain-text quoted reply block matching Gmail's format.
+ * Format: "On Tue, Apr 7, 2026 at 1:37 PM Name <email> wrote:\n> line1\n> line2..."
+ */
+export function buildPlainTextQuote(from: string, date: string, body: string): string {
+    const formattedDate = formatQuoteDate(date);
+    const quoted = body.split('\n').map(line => `> ${line}`).join('\n');
+    return `\n\nOn ${formattedDate} ${from} wrote:\n${quoted}`;
+}
+
+/**
+ * Build an HTML quoted reply block matching Gmail's native format.
+ * Uses Gmail's actual CSS classes and inline styles.
  */
 export function buildHtmlQuote(from: string, date: string, bodyHtml: string, bodyText: string): string {
-    // Use HTML body if available, otherwise convert plain text
+    const formattedDate = formatQuoteDate(date);
+    const { name, email } = extractEmail(from);
     const content = bodyHtml || plainTextToHtml(bodyText).replace(/<\/?html>|<\/?body[^>]*>/g, '');
-    return `<br><div class="gmail_quote"><div style="margin:0 0 8px 0;color:#888;">On ${date.replace(/</g, '&lt;').replace(/>/g, '&gt;')}, ${from.replace(/</g, '&lt;').replace(/>/g, '&gt;')} wrote:</div><blockquote style="margin:0 0 0 8px;padding:0 0 0 12px;border-left:2px solid #ccc;color:#555;">${content}</blockquote></div>`;
+
+    const attrLine = `On ${escapeHtml(formattedDate)} ${escapeHtml(name)} &lt;<a href="mailto:${escapeHtml(email)}">${escapeHtml(email)}</a>&gt; wrote:`;
+
+    return `<br><div class="gmail_quote gmail_quote_container">` +
+        `<div dir="ltr" class="gmail_attr">${attrLine}<br></div>` +
+        `<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex">` +
+        `${content}` +
+        `</blockquote></div>`;
 }
 
 export const validateEmail = (email: string): boolean => {
