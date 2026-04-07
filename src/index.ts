@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 import http from 'http';
 import open from 'open';
 import os from 'os';
-import {createEmailMessage, createEmailWithNodemailer} from "./utl.js";
+import {createEmailMessage, createEmailWithNodemailer, buildPlainTextQuote, buildHtmlQuote} from "./utl.js";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
@@ -371,6 +371,49 @@ async function main() {
                     }
                 }
 
+                // Auto-quote: when replying to a thread, fetch the last message and append quoted text
+                if (validatedArgs.threadId && validatedArgs.inReplyTo && !validatedArgs._skipQuote) {
+                    try {
+                        const threadForQuote = await withTimeout(gmail.users.threads.get({
+                            userId: 'me',
+                            id: validatedArgs.threadId,
+                            format: 'full',
+                        }), DEFAULT_TIMEOUT_MS, 'threads.get for quote');
+
+                        const threadMessages = threadForQuote.data.messages || [];
+                        if (threadMessages.length > 0) {
+                            const lastMsg = threadMessages[threadMessages.length - 1];
+                            const lastHeaders = lastMsg.payload?.headers || [];
+                            const quotedFrom = lastHeaders.find(h => h.name?.toLowerCase() === 'from')?.value || '';
+                            const quotedDate = lastHeaders.find(h => h.name?.toLowerCase() === 'date')?.value || '';
+
+                            const { text: quotedText, html: quotedHtml } = extractEmailContent(lastMsg.payload as GmailMessagePart || {});
+
+                            if (quotedText || quotedHtml) {
+                                // Append plain text quote
+                                const textBody = quotedText || quotedHtml.replace(/<[^>]+>/g, '');
+                                validatedArgs.body = validatedArgs.body + buildPlainTextQuote(quotedFrom, quotedDate, textBody);
+
+                                // Append HTML quote
+                                if (validatedArgs.htmlBody) {
+                                    // Insert before closing </body></html> if present
+                                    validatedArgs.htmlBody = validatedArgs.htmlBody.replace(
+                                        /<\/body>\s*<\/html>\s*$/i,
+                                        buildHtmlQuote(quotedFrom, quotedDate, quotedHtml, quotedText) + '</body></html>'
+                                    );
+                                    // If no closing tags matched, just append
+                                    if (!validatedArgs.htmlBody.includes('gmail_quote')) {
+                                        validatedArgs.htmlBody = validatedArgs.htmlBody + buildHtmlQuote(quotedFrom, quotedDate, quotedHtml, quotedText);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (quoteError: any) {
+                        console.warn(`Warning: Could not fetch thread for quoting: ${quoteError.message}`);
+                        // Continue without quote - degraded but not broken
+                    }
+                }
+
                 // Check if we have attachments
                 if (validatedArgs.attachments && validatedArgs.attachments.length > 0) {
                     // Use Nodemailer to create properly formatted RFC822 message
@@ -524,6 +567,9 @@ async function main() {
                 case "send_email":
                 case "draft_email": {
                     const validatedArgs = SendEmailSchema.parse(args);
+                    if (validatedArgs.skipQuote) {
+                        (validatedArgs as any)._skipQuote = true;
+                    }
                     const action = name === "send_email" ? "send" : "draft";
                     return await handleEmailAction(action, validatedArgs);
                 }

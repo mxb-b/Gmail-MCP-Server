@@ -16,6 +16,24 @@ function encodeEmailHeader(text: string): string {
     return text;
 }
 
+/**
+ * Build a plain-text quoted reply block.
+ * Format: "On {date}, {from} wrote:\n> line1\n> line2..."
+ */
+export function buildPlainTextQuote(from: string, date: string, body: string): string {
+    const quoted = body.split('\n').map(line => `> ${line}`).join('\n');
+    return `\n\nOn ${date}, ${from} wrote:\n${quoted}`;
+}
+
+/**
+ * Build an HTML quoted reply block with Gmail-style blockquote styling.
+ */
+export function buildHtmlQuote(from: string, date: string, bodyHtml: string, bodyText: string): string {
+    // Use HTML body if available, otherwise convert plain text
+    const content = bodyHtml || plainTextToHtml(bodyText).replace(/<\/?html>|<\/?body[^>]*>/g, '');
+    return `<br><div class="gmail_quote"><div style="margin:0 0 8px 0;color:#888;">On ${date.replace(/</g, '&lt;').replace(/>/g, '&gt;')}, ${from.replace(/</g, '&lt;').replace(/>/g, '&gt;')} wrote:</div><blockquote style="margin:0 0 0 8px;padding:0 0 0 12px;border-left:2px solid #ccc;color:#555;">${content}</blockquote></div>`;
+}
+
 export const validateEmail = (email: string): boolean => {
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
     return emailRegex.test(email);
@@ -29,14 +47,41 @@ function sanitizeHeaderValue(value: string): string {
     return value.replace(/[\r\n\0]/g, '');
 }
 
+/**
+ * Convert plain text email body to simple HTML.
+ * Double newlines become paragraph breaks, single newlines become <br>.
+ * HTML entities are escaped.
+ */
+export function plainTextToHtml(text: string): string {
+    // Escape HTML entities
+    const escaped = text
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
+    // Split into paragraphs on double newlines, then convert single newlines to <br>
+    const paragraphs = escaped.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
+    const htmlBody = paragraphs.map(p => `<p style="margin:0 0 16px 0;">${p.replace(/\n/g, '<br>')}</p>`).join('\n');
+
+    return `<html><body style="font-family:sans-serif;font-size:14px;color:#222;">${htmlBody}</body></html>`;
+}
+
 export function createEmailMessage(validatedArgs: any): string {
     const encodedSubject = encodeEmailHeader(sanitizeHeaderValue(validatedArgs.subject));
     // Determine content type based on available content and explicit mimeType
     let mimeType = validatedArgs.mimeType || 'text/plain';
-    
+
     // If htmlBody is provided and mimeType isn't explicitly set to text/plain,
     // use multipart/alternative to include both versions
     if (validatedArgs.htmlBody && mimeType !== 'text/plain') {
+        mimeType = 'multipart/alternative';
+    }
+
+    // Auto-upgrade: when sending plain text with no explicit htmlBody,
+    // generate an HTML version to prevent Gmail line-break rendering issues
+    if (mimeType === 'text/plain' && !validatedArgs.htmlBody) {
+        validatedArgs.htmlBody = plainTextToHtml(validatedArgs.body);
         mimeType = 'multipart/alternative';
     }
 
@@ -144,6 +189,9 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         });
     }
 
+    // Auto-generate HTML for attachment emails too
+    const htmlBody = validatedArgs.htmlBody || plainTextToHtml(validatedArgs.body);
+
     const mailOptions = {
         from: validatedArgs.from || 'me', // Gmail API uses default send-as if 'me', or specified alias
         to: validatedArgs.to.join(', '),
@@ -151,7 +199,7 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         bcc: validatedArgs.bcc?.join(', '),
         subject: validatedArgs.subject,
         text: validatedArgs.body,
-        html: validatedArgs.htmlBody,
+        html: htmlBody,
         attachments: attachments,
         inReplyTo: validatedArgs.inReplyTo,
         references: validatedArgs.references || validatedArgs.inReplyTo

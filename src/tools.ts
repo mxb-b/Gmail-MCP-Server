@@ -14,6 +14,7 @@ export const SendEmailSchema = z.object({
   threadId: z.string().optional().describe("Thread ID to reply to"),
   inReplyTo: z.string().optional().describe("Message ID being replied to"),
   attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
+  skipQuote: z.boolean().optional().default(false).describe("Skip auto-quoting the original message when replying to a thread"),
 });
 
 export const ReadEmailSchema = z.object({
