@@ -48,6 +48,35 @@ function sanitizeHeaderValue(value: string): string {
 }
 
 /**
+ * Detect if a string contains HTML markup.
+ */
+export function isHtml(text: string): boolean {
+    return /<\/?(?:html|body|div|p|br|h[1-6]|ul|ol|li|table|tr|td|a|img|strong|em|b|i|span|blockquote)\b/i.test(text);
+}
+
+/**
+ * Strip HTML tags to produce a plain text version.
+ */
+export function htmlToPlainText(html: string): string {
+    return html
+        .replace(/<br\s*\/?>/gi, '\n')
+        .replace(/<\/p>/gi, '\n\n')
+        .replace(/<\/div>/gi, '\n')
+        .replace(/<\/h[1-6]>/gi, '\n\n')
+        .replace(/<\/li>/gi, '\n')
+        .replace(/<li[^>]*>/gi, '- ')
+        .replace(/<[^>]+>/g, '')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'")
+        .replace(/&nbsp;/g, ' ')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+}
+
+/**
  * Convert plain text email body to simple HTML.
  * Double newlines become paragraph breaks, single newlines become <br>.
  * HTML entities are escaped.
@@ -78,10 +107,17 @@ export function createEmailMessage(validatedArgs: any): string {
         mimeType = 'multipart/alternative';
     }
 
-    // Auto-upgrade: when sending plain text with no explicit htmlBody,
-    // generate an HTML version to prevent Gmail line-break rendering issues
-    if (mimeType === 'text/plain' && !validatedArgs.htmlBody) {
-        validatedArgs.htmlBody = plainTextToHtml(validatedArgs.body);
+    // Auto-upgrade: when sending with no explicit htmlBody,
+    // detect whether body is HTML or plain text and handle accordingly
+    if (!validatedArgs.htmlBody) {
+        if (isHtml(validatedArgs.body)) {
+            // Body contains HTML markup — use it as htmlBody, generate plain text fallback
+            validatedArgs.htmlBody = validatedArgs.body;
+            validatedArgs.body = htmlToPlainText(validatedArgs.body);
+        } else {
+            // Plain text — generate an HTML version to prevent Gmail line-break issues
+            validatedArgs.htmlBody = plainTextToHtml(validatedArgs.body);
+        }
         mimeType = 'multipart/alternative';
     }
 
@@ -189,8 +225,16 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         });
     }
 
-    // Auto-generate HTML for attachment emails too
-    const htmlBody = validatedArgs.htmlBody || plainTextToHtml(validatedArgs.body);
+    // Auto-generate HTML for attachment emails too, with HTML detection
+    let htmlBody = validatedArgs.htmlBody;
+    if (!htmlBody) {
+        if (isHtml(validatedArgs.body)) {
+            htmlBody = validatedArgs.body;
+            validatedArgs.body = htmlToPlainText(validatedArgs.body);
+        } else {
+            htmlBody = plainTextToHtml(validatedArgs.body);
+        }
+    }
 
     const mailOptions = {
         from: validatedArgs.from || 'me', // Gmail API uses default send-as if 'me', or specified alias
