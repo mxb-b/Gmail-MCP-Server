@@ -251,6 +251,12 @@ export function createEmailMessage(validatedArgs: any): string {
 }
 
 
+// 20 MB cap on total decoded inline attachment bytes per email.
+const MAX_INLINE_ATTACHMENTS_BYTES = 20 * 1024 * 1024;
+
+/** An attachment is either a server file path (legacy) or inline bytes carried as base64. */
+export type AttachmentInput = string | { filename: string; mimeType?: string; contentBase64: string };
+
 export async function createEmailWithNodemailer(validatedArgs: any): Promise<string> {
     // Validate email addresses
     (validatedArgs.to as string[]).forEach(email => {
@@ -266,19 +272,37 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         buffer: true
     });
 
-    // Prepare attachments for nodemailer
-    const attachments = [];
-    for (const filePath of validatedArgs.attachments) {
-        if (!fs.existsSync(filePath)) {
-            throw new Error(`File does not exist: ${filePath}`);
+    // Prepare attachments for nodemailer. Each item is either a server file path (legacy)
+    // or an inline object carrying base64-encoded bytes directly from the caller.
+    const attachments: Array<{ filename: string; path?: string; content?: Buffer; contentType?: string }> = [];
+    let totalInlineBytes = 0;
+    for (const item of (validatedArgs.attachments as AttachmentInput[])) {
+        if (typeof item === 'string') {
+            const filePath = item;
+            if (!fs.existsSync(filePath)) {
+                throw new Error(`File does not exist: ${filePath}`);
+            }
+
+            const fileName = path.basename(filePath);
+
+            attachments.push({
+                filename: fileName,
+                path: filePath
+            });
+        } else {
+            const content = Buffer.from(item.contentBase64, 'base64');
+            totalInlineBytes += content.length;
+            if (totalInlineBytes > MAX_INLINE_ATTACHMENTS_BYTES) {
+                throw new Error(`Inline attachments exceed the ${MAX_INLINE_ATTACHMENTS_BYTES / (1024 * 1024)} MB total limit`);
+            }
+
+            const attachment: { filename: string; content: Buffer; contentType?: string } = {
+                filename: item.filename,
+                content,
+            };
+            if (item.mimeType) attachment.contentType = item.mimeType;
+            attachments.push(attachment);
         }
-        
-        const fileName = path.basename(filePath);
-        
-        attachments.push({
-            filename: fileName,
-            path: filePath
-        });
     }
 
     // Auto-generate HTML for attachment emails too, with HTML detection

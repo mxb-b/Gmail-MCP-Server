@@ -21,6 +21,7 @@
 - **Thread-level tools** — `get_thread`, `list_inbox_threads`, `get_inbox_with_threads` for efficient thread-based email reading in a single call
 - **Tool annotations** — MCP spec annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) on all tools for safer LLM tool execution ([PR #14](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/14) by [@bryankthompson](https://github.com/bryankthompson))
 - **Download email tool** — `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
+- **Inline attachments** — attach and download files without touching the server's filesystem: `send_email`/`draft_email`/`reply_all` accept attachment bytes directly as base64, and `download_attachment` can return extracted text (PDF/DOCX/XLSX/CSV/etc.) or raw base64 inline instead of writing to disk. Essential for servers running on remote infrastructure like Cloud Run. See [Inline attachments](#inline-attachments) below.
 
 All features are production-tested in daily use.
 
@@ -409,8 +410,63 @@ Attachments (2):
 Parameters:
 - `messageId`: The ID of the email containing the attachment
 - `attachmentId`: The attachment ID (shown in enhanced email display)
-- `savePath`: Directory to save the file (optional, defaults to current directory)
-- `filename`: Custom filename (optional, uses original filename if not provided)
+- `savePath`: Directory to save the file (optional, defaults to current directory, only used by `mode: 'file'`)
+- `filename`: Custom filename (optional, uses original filename if not provided, only used by `mode: 'file'`)
+- `mode`: `'auto'` (default) | `'text'` | `'base64'` | `'file'` — see [Inline attachments](#inline-attachments) below
+- `maxBytes`: Max size to return inline for `auto`/`text`/`base64` (default 10 MB)
+
+### Inline attachments
+
+Because this server commonly runs on remote infrastructure (e.g. Cloud Run), a caller often can't read files the server wrote to its own disk, or supply a local file for the server to attach. Inline attachments solve both directions: bytes travel as base64 over MCP instead of through the server's filesystem.
+
+**Attaching a file inline** (`send_email`, `draft_email`, `reply_all`): each entry in `attachments` is either a server file path (legacy) or an object carrying the bytes directly:
+
+```json
+{
+  "to": ["recipient@example.com"],
+  "subject": "Report attached",
+  "body": "See attached.",
+  "attachments": [
+    {
+      "filename": "report.pdf",
+      "mimeType": "application/pdf",
+      "contentBase64": "JVBERi0xLjQKJ..."
+    },
+    "/path/still/works/too.docx"
+  ]
+}
+```
+
+Total inline attachment bytes (decoded) per email are capped at 20 MB.
+
+**Reading an attachment inline** (`download_attachment`): the `mode` parameter controls how the attachment comes back:
+
+| Mode | Behavior |
+|------|----------|
+| `auto` (default) | Returns extracted text for PDF, DOCX, XLSX/XLS/CSV, TXT/MD/JSON, and HTML attachments. Falls back to base64 for everything else (e.g. images). |
+| `text` | Forces text extraction; returns an error listing supported types if the attachment isn't one of them. |
+| `base64` | Always returns `{filename, mimeType, size, contentBase64}` inline — no extraction attempted. |
+| `file` | Legacy behavior: saves the attachment to disk on the server and returns the path. |
+
+`auto`/`text`/`base64` are capped at 10 MB by default (override with `maxBytes`); attachments over the cap return an error suggesting `mode: 'file'` or a larger `maxBytes`. Extracted text is capped at 200,000 characters, with a `[truncated: N more characters]` marker appended when cut.
+
+Example — reading a PDF's text without ever touching the server's disk:
+```json
+{
+  "messageId": "182ab45cd67ef",
+  "attachmentId": "ANGjdJ9fkTs-i3GCQo5o97f_itG...",
+  "mode": "auto"
+}
+```
+returns:
+```
+Attachment: report.pdf
+Type: application/pdf
+Size: 48213 bytes
+Mode: text (pdf)
+
+<extracted text of the PDF>
+```
 
 ### 5. Search Emails (`search_emails`)
 Searches for emails using Gmail search syntax.

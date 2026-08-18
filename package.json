@@ -52,9 +52,12 @@
     "email-addresses": "^5.0.0",
     "google-auth-library": "^9.4.1",
     "googleapis": "^129.0.0",
+    "mammoth": "^1.12.1",
     "mime-types": "^3.0.1",
     "nodemailer": "^7.0.11",
     "open": "^10.0.0",
+    "pdf-parse": "^2.4.5",
+    "xlsx": "^0.18.5",
     "zod": "^3.22.4",
     "zod-to-json-schema": "^3.22.1"
   },

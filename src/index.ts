@@ -15,6 +15,8 @@ import http from 'http';
 import open from 'open';
 import os from 'os';
 import {createEmailMessage, createEmailWithNodemailer, buildPlainTextQuote, buildHtmlQuote} from "./utl.js";
+import { extractAttachmentText } from "./attachment-extract.js";
+import { extension as mimeExtension } from "mime-types";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
@@ -1199,8 +1201,43 @@ async function main() {
                 }
                 case "download_attachment": {
                     const validatedArgs = DownloadAttachmentSchema.parse(args);
+                    const mode = validatedArgs.mode || 'auto';
 
                     try {
+                        // Always fetch the message so we know the attachment's original filename and mimeType,
+                        // regardless of mode (auto/text/base64 need mimeType to decide extraction; file needs
+                        // a sensible default filename).
+                        const messageResponse = await withTimeout(gmail.users.messages.get({
+                            userId: 'me',
+                            id: validatedArgs.messageId,
+                            format: 'full',
+                        }), DEFAULT_TIMEOUT_MS, 'messages.get attachment metadata');
+
+                        // Find the attachment part to get its original filename and mimeType
+                        const findAttachment = (part: any): { filename: string; mimeType: string } | null => {
+                            if (part.body && part.body.attachmentId === validatedArgs.attachmentId) {
+                                return {
+                                    filename: part.filename || '',
+                                    mimeType: part.mimeType || 'application/octet-stream',
+                                };
+                            }
+                            if (part.parts) {
+                                for (const subpart of part.parts) {
+                                    const found = findAttachment(subpart);
+                                    if (found) return found;
+                                }
+                            }
+                            return null;
+                        };
+
+                        const found = findAttachment(messageResponse.data.payload) || { filename: '', mimeType: 'application/octet-stream' };
+                        const originalMimeType = found.mimeType;
+                        let filename = validatedArgs.filename || found.filename;
+                        if (!filename) {
+                            const ext = mimeExtension(originalMimeType);
+                            filename = `attachment-${validatedArgs.attachmentId.slice(0, 24)}${ext ? `.${ext}` : ''}`;
+                        }
+
                         // Get the attachment data from Gmail API
                         const attachmentResponse = await withTimeout(gmail.users.messages.attachments.get({
                             userId: 'me',
@@ -1216,58 +1253,92 @@ async function main() {
                         const data = attachmentResponse.data.data;
                         const buffer = Buffer.from(data, 'base64url');
 
-                        // Determine save path and filename
-                        const savePath = validatedArgs.savePath || process.cwd();
-                        let filename = validatedArgs.filename;
+                        if (mode === 'file') {
+                            // Legacy behavior: save to server disk.
+                            const savePath = validatedArgs.savePath || process.cwd();
 
-                        if (!filename) {
-                            // Get original filename from message if not provided
-                            const messageResponse = await withTimeout(gmail.users.messages.get({
-                                userId: 'me',
-                                id: validatedArgs.messageId,
-                                format: 'full',
-                            }), DEFAULT_TIMEOUT_MS, 'messages.get attachment filename');
+                            // Sanitize filename to prevent path traversal
+                            const safeFilename = path.basename(filename);
 
-                            // Find the attachment part to get original filename
-                            const findAttachment = (part: any): string | null => {
-                                if (part.body && part.body.attachmentId === validatedArgs.attachmentId) {
-                                    return part.filename || `attachment-${validatedArgs.attachmentId}`;
-                                }
-                                if (part.parts) {
-                                    for (const subpart of part.parts) {
-                                        const found = findAttachment(subpart);
-                                        if (found) return found;
-                                    }
-                                }
-                                return null;
+                            // Ensure save directory exists
+                            if (!fs.existsSync(savePath)) {
+                                fs.mkdirSync(savePath, { recursive: true });
+                            }
+
+                            // Resolve and validate final path stays within savePath
+                            const resolvedSavePath = path.resolve(savePath);
+                            const fullPath = path.resolve(resolvedSavePath, safeFilename);
+                            if (!fullPath.startsWith(resolvedSavePath + path.sep) && fullPath !== resolvedSavePath) {
+                                throw new Error('Invalid filename: path traversal detected');
+                            }
+                            fs.writeFileSync(fullPath, buffer);
+
+                            return {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: `Attachment downloaded successfully:\nFile: ${safeFilename}\nSize: ${buffer.length} bytes\nSaved to: ${fullPath}`,
+                                    },
+                                ],
                             };
-
-                            filename = findAttachment(messageResponse.data.payload) || `attachment-${validatedArgs.attachmentId}`;
                         }
 
-                        // Sanitize filename to prevent path traversal
-                        filename = path.basename(filename);
-
-                        // Ensure save directory exists
-                        if (!fs.existsSync(savePath)) {
-                            fs.mkdirSync(savePath, { recursive: true });
+                        // Inline modes: auto, text, base64.
+                        const maxBytes = validatedArgs.maxBytes || 10 * 1024 * 1024;
+                        if (buffer.length > maxBytes) {
+                            return {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: `Attachment "${filename}" is ${buffer.length} bytes, exceeding the ${maxBytes} byte inline limit for mode='${mode}'. Retry with a larger maxBytes, or use mode='file' to save it to disk on the server instead.`,
+                                    },
+                                ],
+                            };
                         }
 
-                        // Resolve and validate final path stays within savePath
-                        const resolvedSavePath = path.resolve(savePath);
-                        const fullPath = path.resolve(resolvedSavePath, filename);
-                        if (!fullPath.startsWith(resolvedSavePath + path.sep) && fullPath !== resolvedSavePath) {
-                            throw new Error('Invalid filename: path traversal detected');
-                        }
-                        fs.writeFileSync(fullPath, buffer);
+                        // Both 'text' and 'auto' attempt extraction first; 'auto' falls back to base64
+                        // below when the type isn't extractable, while 'text' errors instead.
+                        // 'base64' skips extraction entirely.
+                        if (mode === 'text' || mode === 'auto') {
+                            const extracted = await extractAttachmentText(buffer, originalMimeType, filename);
+                            if (extracted) {
+                                return {
+                                    content: [
+                                        {
+                                            type: "text",
+                                            text: `Attachment: ${filename}\nType: ${originalMimeType}\nSize: ${buffer.length} bytes\nMode: text (${extracted.kind})\n\n${extracted.text}`,
+                                        },
+                                    ],
+                                };
+                            }
 
+                            if (mode === 'text') {
+                                return {
+                                    content: [
+                                        {
+                                            type: "text",
+                                            text: `Cannot extract text from "${filename}" (type: ${originalMimeType}). Supported types: application/pdf, DOCX, XLSX/XLS, CSV, TXT/MD/JSON, HTML. Use mode='base64' or mode='file' instead.`,
+                                        },
+                                    ],
+                                };
+                            }
+                            // mode === 'auto' and not extractable: fall through to base64 below.
+                        }
+
+                        const base64Payload = {
+                            filename,
+                            mimeType: originalMimeType,
+                            size: buffer.length,
+                            contentBase64: buffer.toString('base64'),
+                        };
                         return {
                             content: [
                                 {
                                     type: "text",
-                                    text: `Attachment downloaded successfully:\nFile: ${filename}\nSize: ${buffer.length} bytes\nSaved to: ${fullPath}`,
+                                    text: JSON.stringify(base64Payload),
                                 },
                             ],
+                            structuredContent: base64Payload,
                         };
                     } catch (error: any) {
                         return {

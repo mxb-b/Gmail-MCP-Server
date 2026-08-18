@@ -2,6 +2,19 @@ import { z } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 
 // Schema definitions
+
+// An attachment can be a server file path (legacy) or an inline object carrying bytes directly.
+export const AttachmentInputSchema = z.union([
+  z.string(),
+  z.object({
+    filename: z.string(),
+    mimeType: z.string().optional(),
+    contentBase64: z.string(),
+  }),
+]);
+
+const ATTACHMENTS_DESCRIPTION = "Attachments: each item is either a file path on the server, or an object {filename, mimeType?, contentBase64} carrying the file bytes inline (standard base64). Total inline size limit 20 MB.";
+
 export const SendEmailSchema = z.object({
   to: z.array(z.string()).describe("List of recipient email addresses"),
   subject: z.string().describe("Email subject"),
@@ -13,7 +26,7 @@ export const SendEmailSchema = z.object({
   bcc: z.array(z.string()).optional().describe("List of BCC recipients"),
   threadId: z.string().optional().describe("Thread ID to reply to"),
   inReplyTo: z.string().optional().describe("Message ID being replied to"),
-  attachments: z.array(z.string()).optional().describe("List of file paths to attach to the email"),
+  attachments: z.array(AttachmentInputSchema).optional().describe(ATTACHMENTS_DESCRIPTION),
   skipQuote: z.boolean().optional().default(false).describe("Skip auto-quoting the original message when replying to a thread"),
 });
 
@@ -126,8 +139,15 @@ export const CreateFilterFromTemplateSchema = z.object({
 export const DownloadAttachmentSchema = z.object({
   messageId: z.string().describe("ID of the email message containing the attachment"),
   attachmentId: z.string().describe("ID of the attachment to download"),
-  filename: z.string().optional().describe("Filename to save the attachment as (if not provided, uses original filename)"),
-  savePath: z.string().optional().describe("Directory path to save the attachment (defaults to current directory)"),
+  filename: z.string().optional().describe("Filename to save the attachment as (if not provided, uses original filename). Only used by mode='file'."),
+  savePath: z.string().optional().describe("Directory path to save the attachment (defaults to current directory). Only used by mode='file'."),
+  mode: z.enum(['auto', 'text', 'base64', 'file']).optional().default('auto').describe(
+    "auto (default): returns extracted text inline for PDF/DOCX/XLSX/XLS/CSV/TXT/MD/JSON/HTML attachments, or base64 inline for everything else. " +
+    "text: force text extraction, erroring if the type isn't supported. " +
+    "base64: always return {filename, mimeType, size, contentBase64} inline (default cap 10 MB; override with maxBytes). " +
+    "file: legacy behavior, saves the attachment to disk on the server."
+  ),
+  maxBytes: z.number().optional().describe("Maximum attachment size (bytes) to return inline for modes auto/text/base64. Defaults to 10 MB. Attachments over this size return an error suggesting mode='file' or a larger maxBytes."),
 });
 
 export const DownloadEmailSchema = z.object({
@@ -160,7 +180,7 @@ export const ReplyAllSchema = z.object({
   body: z.string().describe("Reply body content (used for text/plain or when htmlBody not provided)"),
   htmlBody: z.string().optional().describe("HTML version of the reply body"),
   mimeType: z.enum(['text/plain', 'text/html', 'multipart/alternative']).optional().default('text/plain').describe("Email content type"),
-  attachments: z.array(z.string()).optional().describe("List of file paths to attach to the reply"),
+  attachments: z.array(AttachmentInputSchema).optional().describe(ATTACHMENTS_DESCRIPTION),
 });
 
 // Tool definition type
@@ -199,7 +219,7 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "download_attachment",
-    description: "Downloads an email attachment to a specified location",
+    description: "Retrieves an email attachment. By default (mode='auto') returns extracted text inline for PDF, DOCX, XLSX/XLS/CSV, TXT/MD/JSON, and HTML attachments, or base64-encoded bytes inline for other types (e.g. images) — no server filesystem access needed. Use mode='text' to force extraction (errors on unsupported types), mode='base64' to always get raw bytes inline, or mode='file' for the legacy behavior of saving to disk on the server.",
     schema: DownloadAttachmentSchema,
     scopes: ["gmail.readonly", "gmail.modify"],
     annotations: { title: "Download Attachment", readOnlyHint: true },
