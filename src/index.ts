@@ -1213,31 +1213,6 @@ async function main() {
                             format: 'full',
                         }), DEFAULT_TIMEOUT_MS, 'messages.get attachment metadata');
 
-                        // Find the attachment part to get its original filename and mimeType
-                        const findAttachment = (part: any): { filename: string; mimeType: string } | null => {
-                            if (part.body && part.body.attachmentId === validatedArgs.attachmentId) {
-                                return {
-                                    filename: part.filename || '',
-                                    mimeType: part.mimeType || 'application/octet-stream',
-                                };
-                            }
-                            if (part.parts) {
-                                for (const subpart of part.parts) {
-                                    const found = findAttachment(subpart);
-                                    if (found) return found;
-                                }
-                            }
-                            return null;
-                        };
-
-                        const found = findAttachment(messageResponse.data.payload) || { filename: '', mimeType: 'application/octet-stream' };
-                        const originalMimeType = found.mimeType;
-                        let filename = validatedArgs.filename || found.filename;
-                        if (!filename) {
-                            const ext = mimeExtension(originalMimeType);
-                            filename = `attachment-${validatedArgs.attachmentId.slice(0, 24)}${ext ? `.${ext}` : ''}`;
-                        }
-
                         // Get the attachment data from Gmail API
                         const attachmentResponse = await withTimeout(gmail.users.messages.attachments.get({
                             userId: 'me',
@@ -1252,6 +1227,40 @@ async function main() {
                         // Decode the base64 data
                         const data = attachmentResponse.data.data;
                         const buffer = Buffer.from(data, 'base64url');
+
+                        // Resolve the attachment's original filename and mimeType. Gmail attachment IDs are
+                        // NOT stable between API calls, so an exact ID match against a fresh messages.get
+                        // often fails; fall back to a unique byte-size match, then to caller-supplied hints.
+                        type PartMeta = { filename: string; mimeType: string; size: number; attachmentId: string };
+                        const parts: PartMeta[] = [];
+                        const collectParts = (part: any) => {
+                            if (part?.body?.attachmentId) {
+                                parts.push({
+                                    filename: part.filename || '',
+                                    mimeType: part.mimeType || 'application/octet-stream',
+                                    size: Number(part.body.size) || 0,
+                                    attachmentId: part.body.attachmentId,
+                                });
+                            }
+                            if (part?.parts) part.parts.forEach(collectParts);
+                        };
+                        collectParts(messageResponse.data.payload);
+
+                        let found: { filename: string; mimeType: string } | null =
+                            parts.find(p => p.attachmentId === validatedArgs.attachmentId) || null;
+                        if (!found) {
+                            const bySize = parts.filter(p => p.size === buffer.length);
+                            if (bySize.length === 1) found = bySize[0];
+                            else if (bySize.length > 1 && validatedArgs.filename) {
+                                found = bySize.find(p => p.filename === validatedArgs.filename) || bySize[0];
+                            }
+                        }
+                        const originalMimeType = validatedArgs.mimeType || found?.mimeType || 'application/octet-stream';
+                        let filename = validatedArgs.filename || found?.filename || '';
+                        if (!filename) {
+                            const ext = mimeExtension(originalMimeType);
+                            filename = `attachment-${validatedArgs.attachmentId.slice(0, 24)}${ext ? `.${ext}` : ''}`;
+                        }
 
                         if (mode === 'file') {
                             // Legacy behavior: save to server disk.

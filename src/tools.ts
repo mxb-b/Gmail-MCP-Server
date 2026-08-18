@@ -139,7 +139,8 @@ export const CreateFilterFromTemplateSchema = z.object({
 export const DownloadAttachmentSchema = z.object({
   messageId: z.string().describe("ID of the email message containing the attachment"),
   attachmentId: z.string().describe("ID of the attachment to download"),
-  filename: z.string().optional().describe("Filename to save the attachment as (if not provided, uses original filename). Only used by mode='file'."),
+  filename: z.string().optional().describe("Original filename hint (used to detect the file type when Gmail's part metadata cannot be matched; attachment IDs are not stable between calls). In mode='file' it is also the name saved to disk."),
+  mimeType: z.string().optional().describe("MIME type hint for the attachment (e.g. from read_email's attachment list). Used when the part metadata cannot be matched."),
   savePath: z.string().optional().describe("Directory path to save the attachment (defaults to current directory). Only used by mode='file'."),
   mode: z.enum(['auto', 'text', 'base64', 'file']).optional().default('auto').describe(
     "auto (default): returns extracted text inline for PDF/DOCX/XLSX/XLS/CSV/TXT/MD/JSON/HTML attachments, or base64 inline for everything else. " +
