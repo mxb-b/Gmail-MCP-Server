@@ -253,6 +253,69 @@ async function authenticate(scopes: string[]) {
 }
 
 // Main function
+/**
+ * Security-relevant headers for phishing and mailing-list detection. Returned as extra
+ * "Header: value" lines under the standard From/To/Date block of read_email.
+ */
+function formatSecurityHeaders(headers: Array<{ name?: string | null; value?: string | null }>): string {
+    const wanted = ['reply-to', 'return-path', 'sender', 'list-unsubscribe', 'list-id', 'precedence', 'x-phishtest', 'x-phish-test'];
+    const lines: string[] = [];
+    for (const h of headers) {
+        const name = (h.name || '').toLowerCase();
+        const value = (h.value || '').trim();
+        if (!value) continue;
+        if (name === 'authentication-results') {
+            // Condense to the spf/dkim/dmarc verdicts, which is what a reader needs.
+            const verdicts = Array.from(value.matchAll(/\b(spf|dkim|dmarc)=([a-z]+)/gi)).map(m => `${m[1].toLowerCase()}=${m[2].toLowerCase()}`);
+            const seen = new Set<string>();
+            const uniq = verdicts.filter(v => (seen.has(v) ? false : (seen.add(v), true)));
+            if (uniq.length) lines.push(`Authentication-Results: ${uniq.join(' ')}`);
+            continue;
+        }
+        if (wanted.includes(name) || name.startsWith('x-phish') || name.startsWith('x-knowbe4') || name.startsWith('x-kb4')) {
+            lines.push(`${h.name}: ${value.length > 300 ? value.slice(0, 300) + '…' : value}`);
+        }
+    }
+    return lines.length ? '\n' + lines.join('\n') : '';
+}
+
+/**
+ * List the actual link targets in a message so the reader can compare display text with
+ * the real destination. HTML anchors first (with their visible text), then bare URLs from
+ * the plain-text part. Capped at 40 unique links.
+ */
+function formatLinks(text: string, html: string): string {
+    const links: Array<{ href: string; label: string }> = [];
+    const seen = new Set<string>();
+    const add = (href: string, label: string) => {
+        const clean = href.trim();
+        if (!/^https?:\/\//i.test(clean) || seen.has(clean) || links.length >= 40) return;
+        seen.add(clean);
+        links.push({ href: clean, label: label.trim() });
+    };
+    if (html) {
+        for (const m of html.matchAll(/<a\b[^>]*?href\s*=\s*["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+            const label = m[2].replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/\s+/g, ' ').trim();
+            add(m[1], label);
+        }
+    }
+    if (text) {
+        for (const m of text.matchAll(/https?:\/\/[^\s<>"'\)\]]+/g)) add(m[0].replace(/[.,;:]+$/, ''), '');
+    }
+    if (!links.length) return '';
+    const hostOf = (u: string) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+    const lines = links.map(l => {
+        const host = hostOf(l.href);
+        let flag = '';
+        const labelHostMatch = l.label.match(/^(?:https?:\/\/)?(?:www\.)?([a-z0-9.-]+\.[a-z]{2,})(?:[\/\s]|$)/i);
+        if (labelHostMatch && host && !host.endsWith(labelHostMatch[1].toLowerCase()) && !labelHostMatch[1].toLowerCase().endsWith(host)) {
+            flag = '  [display/target host mismatch]';
+        }
+        return l.label ? `- "${l.label.slice(0, 80)}" -> ${l.href}${flag}` : `- ${l.href}`;
+    });
+    return `\n\nLinks (${links.length}):\n${lines.join('\n')}`;
+}
+
 async function main() {
     await loadCredentials();
 
@@ -599,11 +662,15 @@ async function main() {
                         `\n\nAttachments (${attachments.length}):\n` +
                         attachments.map(a => `- ${a.filename} (${a.mimeType}, ${Math.round(a.size/1024)} KB, ID: ${a.id})`).join('\n') : '';
 
+                    // Security-relevant headers (phishing / list detection) and the actual link targets.
+                    const securityInfo = formatSecurityHeaders(response.data.payload?.headers || []);
+                    const linkInfo = formatLinks(text, html);
+
                     return {
                         content: [
                             {
                                 type: "text",
-                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}\n\n${contentTypeNote}${body}${attachmentInfo}`,
+                                text: `Thread ID: ${threadId}\nMessage-ID: ${rfcMessageId}\nSubject: ${subject}\nFrom: ${from}\nTo: ${to}\nDate: ${date}${securityInfo}\n\n${contentTypeNote}${body}${attachmentInfo}${linkInfo}`,
                             },
                         ],
                     };
