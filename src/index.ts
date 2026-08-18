@@ -19,7 +19,7 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, DeleteDraftSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "./timeout.js";
 
@@ -766,16 +766,73 @@ async function main() {
 
                 case "delete_email": {
                     const validatedArgs = DeleteEmailSchema.parse(args);
-                    await withTimeout(gmail.users.messages.delete({
-                        userId: 'me',
-                        id: validatedArgs.messageId,
-                    }), DEFAULT_TIMEOUT_MS, 'messages.delete');
+                    try {
+                        await withTimeout(gmail.users.messages.delete({
+                            userId: 'me',
+                            id: validatedArgs.messageId,
+                        }), DEFAULT_TIMEOUT_MS, 'messages.delete');
+                    } catch (err: any) {
+                        const status = err?.code ?? err?.response?.status;
+                        const msg = String(err?.message ?? '');
+                        // messages.delete needs the full https://mail.google.com/ scope. With only
+                        // gmail.modify, fall back to trashing so the caller still gets the message
+                        // out of the way instead of a hard failure.
+                        if (status === 403 || /insufficient permission/i.test(msg)) {
+                            await withTimeout(gmail.users.messages.trash({
+                                userId: 'me',
+                                id: validatedArgs.messageId,
+                            }), DEFAULT_TIMEOUT_MS, 'messages.trash');
+                            return {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: `Email ${validatedArgs.messageId} moved to Trash (permanent delete requires the full mail.google.com scope, which is not authorized)`,
+                                    },
+                                ],
+                            };
+                        }
+                        throw err;
+                    }
 
                     return {
                         content: [
                             {
                                 type: "text",
                                 text: `Email ${validatedArgs.messageId} deleted successfully`,
+                            },
+                        ],
+                    };
+                }
+
+                case "delete_draft": {
+                    const validatedArgs = DeleteDraftSchema.parse(args);
+                    let draftId = validatedArgs.draftId;
+                    if (!draftId) {
+                        // Resolve the draft ID from the draft's message ID.
+                        let pageToken: string | undefined = undefined;
+                        do {
+                            const page: any = await withTimeout(gmail.users.drafts.list({
+                                userId: 'me',
+                                maxResults: 100,
+                                pageToken,
+                            }), DEFAULT_TIMEOUT_MS, 'drafts.list');
+                            const match = (page.data.drafts || []).find((d: any) => d.message?.id === validatedArgs.messageId);
+                            if (match) { draftId = match.id; break; }
+                            pageToken = page.data.nextPageToken || undefined;
+                        } while (pageToken);
+                        if (!draftId) {
+                            throw new Error(`No draft found with message ID ${validatedArgs.messageId}`);
+                        }
+                    }
+                    await withTimeout(gmail.users.drafts.delete({
+                        userId: 'me',
+                        id: draftId,
+                    }), DEFAULT_TIMEOUT_MS, 'drafts.delete');
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `Draft ${draftId} deleted successfully`,
                             },
                         ],
                     };
@@ -870,10 +927,23 @@ async function main() {
                         async (batch) => {
                             const results = await Promise.all(
                                 batch.map(async (messageId) => {
-                                    await withTimeout(gmail.users.messages.delete({
-                                        userId: 'me',
-                                        id: messageId,
-                                    }), DEFAULT_TIMEOUT_MS, `batch messages.delete ${messageId}`);
+                                    try {
+                                        await withTimeout(gmail.users.messages.delete({
+                                            userId: 'me',
+                                            id: messageId,
+                                        }), DEFAULT_TIMEOUT_MS, `batch messages.delete ${messageId}`);
+                                    } catch (err: any) {
+                                        const status = err?.code ?? err?.response?.status;
+                                        if (status === 403 || /insufficient permission/i.test(String(err?.message ?? ''))) {
+                                            // Same fallback as delete_email: trash when permanent delete is out of scope.
+                                            await withTimeout(gmail.users.messages.trash({
+                                                userId: 'me',
+                                                id: messageId,
+                                            }), DEFAULT_TIMEOUT_MS, `batch messages.trash ${messageId}`);
+                                        } else {
+                                            throw err;
+                                        }
+                                    }
                                     return { messageId, success: true };
                                 })
                             );

@@ -37,6 +37,11 @@ export const DeleteEmailSchema = z.object({
   messageId: z.string().describe("ID of the email message to delete"),
 });
 
+export const DeleteDraftSchema = z.object({
+  draftId: z.string().optional().describe("Draft ID (the r... value returned by draft_email). Either draftId or messageId is required."),
+  messageId: z.string().optional().describe("Message ID of the draft (as returned by search_emails with in:drafts). Resolved to the draft ID via drafts.list."),
+}).refine(d => d.draftId || d.messageId, { message: "Provide draftId or messageId" });
+
 export const ListEmailLabelsSchema = z.object({}).describe("Retrieves all available Gmail labels");
 
 export const CreateLabelSchema = z.object({
@@ -254,10 +259,17 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "delete_email",
-    description: "Permanently deletes an email",
+    description: "Permanently deletes an email. Permanent deletion requires the full https://mail.google.com/ scope; if that scope is not held, the message is moved to Trash instead and the response says so.",
     schema: DeleteEmailSchema,
     scopes: ["gmail.modify"],
     annotations: { title: "Delete Email", destructiveHint: true },
+  },
+  {
+    name: "delete_draft",
+    description: "Permanently deletes a Gmail draft (removes it from the Drafts folder). Accepts the draft ID returned by draft_email or the draft's message ID from an in:drafts search. Uses drafts.delete, which is covered by the gmail.modify scope.",
+    schema: DeleteDraftSchema,
+    scopes: ["gmail.modify", "gmail.compose"],
+    annotations: { title: "Delete Draft", destructiveHint: true },
   },
   {
     name: "batch_modify_emails",
