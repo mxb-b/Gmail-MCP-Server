@@ -57,7 +57,7 @@
     "nodemailer": "^7.0.11",
     "open": "^10.0.0",
     "pdf-parse": "^2.4.5",
-    "xlsx": "^0.18.5",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^3.22.4",
     "zod-to-json-schema": "^3.22.1"
   },
