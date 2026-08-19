@@ -22,6 +22,7 @@
 - **Tool annotations** — MCP spec annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`) on all tools for safer LLM tool execution ([PR #14](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/14) by [@bryankthompson](https://github.com/bryankthompson))
 - **Download email tool** — `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
 - **Inline attachments** — attach and download files without touching the server's filesystem: `send_email`/`draft_email`/`reply_all` accept attachment bytes directly as base64, and `download_attachment` can return extracted text (PDF/DOCX/XLSX/CSV/etc.) or raw base64 inline instead of writing to disk. Essential for servers running on remote infrastructure like Cloud Run. See [Inline attachments](#inline-attachments) below.
+- **Scheduled send**: `schedule_email`, `list_scheduled_emails`, and `cancel_scheduled_email` let you queue an email to send at a future time, since the Gmail API itself has no schedule-send endpoint. Built entirely on existing Gmail primitives (a labeled draft plus a custom header), no external database required. See tools 21-24 below.
 
 All features are production-tested in daily use.
 
@@ -244,6 +245,9 @@ The server automatically filters available tools based on your authorized scopes
 | `read_email`, `search_emails`, `download_attachment` | `gmail.readonly` or `gmail.modify` |
 | `list_email_labels` | `gmail.readonly`, `gmail.modify`, or `gmail.labels` |
 | `send_email`, `draft_email`, `reply_all` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
+| `schedule_email`, `send_due_scheduled_emails` | `gmail.modify`, `gmail.compose`, or `gmail.send` |
+| `list_scheduled_emails` | `gmail.readonly` or `gmail.modify` |
+| `cancel_scheduled_email` | `gmail.modify` or `gmail.compose` |
 | `modify_email`, `delete_email`, `batch_modify_emails`, `batch_delete_emails` | `gmail.modify` |
 | `create_label`, `update_label`, `delete_label`, `get_or_create_label` | `gmail.modify` or `gmail.labels` |
 | `list_filters`, `get_filter`, `create_filter`, `delete_filter`, `create_filter_from_template` | `gmail.settings.basic` |
@@ -302,7 +306,7 @@ npx @gongrzhe/server-gmail-autoauth-mcp auth --scopes=gmail.modify,gmail.setting
 }
 ```
 
-This enables all 20 tools including sending emails, managing labels, creating filters, reply-all, and batch operations.
+This enables all 24 tools including sending emails, managing labels, creating filters, reply-all, scheduled send, and batch operations.
 
 ## Available Tools
 
@@ -660,6 +664,56 @@ Parameters:
 - `htmlBody` (optional): HTML version of the reply body
 - `mimeType` (optional): `text/plain` (default), `text/html`, or `multipart/alternative`
 - `attachments` (optional): Array of file paths to attach
+
+### 21. Schedule Email (`schedule_email`)
+
+Composes an email exactly like `draft_email` (same fields: `to`, `subject`, `body`, `htmlBody`, `cc`, `bcc`, `threadId`, `inReplyTo`, `attachments`, `skipQuote`), plus a required `sendAt`, and queues it to send automatically at that time.
+
+**Why this exists:** the Gmail API has no native schedule-send endpoint. `users.messages.send` and `users.drafts.send` both send immediately, and the "Schedule send" button in the Gmail web UI is a client-side-only feature with no API surface. This tool implements scheduling on top of what the API does offer:
+
+1. It creates a normal Gmail draft (through the same threading/quoting/attachment pipeline as `draft_email`).
+2. It stamps the draft's raw message with an `X-Scheduled-Send-At` header carrying the resolved UTC time.
+3. It applies a `Scheduled` user label to the draft.
+
+The draft is fully visible and editable in Gmail like any other draft the whole time it's pending. A periodic job calls `send_due_scheduled_emails` (see below), which finds every `Scheduled`-labeled draft whose time has passed and calls `drafts.send` on it, sending the exact composed message and removing it from Drafts, same as if a person clicked Send.
+
+```json
+{
+  "to": ["recipient@example.com"],
+  "subject": "Friday Notes",
+  "body": "Here's this week's newsletter...",
+  "sendAt": "2026-08-21T08:00:00-04:00"
+}
+```
+
+Parameters:
+- All `draft_email` parameters
+- `sendAt` (required): ISO 8601 date-time with a timezone offset or `Z` (a bare local time is ambiguous), must be in the future
+
+### 22. List Scheduled Emails (`list_scheduled_emails`)
+
+Lists every pending scheduled send (drafts under the `Scheduled` label), soonest first, with recipient, subject, and target send time.
+
+```json
+{
+  "maxResults": 20
+}
+```
+
+### 23. Cancel Scheduled Email (`cancel_scheduled_email`)
+
+Cancels a scheduled send. By default this only removes the `Scheduled` label: the draft itself is untouched and reverts to a normal editable draft that will never be auto-sent. Pass `permanentlyDelete: true` to remove the draft outright instead.
+
+```json
+{
+  "draftId": "r-1234567890",
+  "permanentlyDelete": false
+}
+```
+
+### 24. Send Due Scheduled Emails (`send_due_scheduled_emails`)
+
+The trigger tool: sends every scheduled email whose `sendAt` has passed. This isn't something the agent calls during normal email processing; it's meant to be invoked on a timer (a Cloud Scheduler job hitting this server's `/mcp` endpoint with a `tools/call` request, the same way any other tool call works). Takes no arguments. Returns a summary of what was sent, what's still pending, and any per-item errors (one failure doesn't block the rest of the sweep). See [deploy/SETUP.md](../deploy/SETUP.md) in the `enrichment` repo for the Cloud Scheduler job configuration.
 
 ## Filter Management Features
 

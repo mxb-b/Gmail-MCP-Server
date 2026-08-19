@@ -50,6 +50,27 @@ export const DeleteEmailSchema = z.object({
   messageId: z.string().describe("ID of the email message to delete"),
 });
 
+export const ScheduleEmailSchema = SendEmailSchema.extend({
+  sendAt: z.string().describe("ISO 8601 date-time for when to send this email, e.g. '2026-08-20T14:00:00-04:00'. Include a timezone offset or trailing Z; a bare local time is ambiguous. Must be in the future."),
+}).refine(d => {
+  const t = Date.parse(d.sendAt);
+  return !Number.isNaN(t) && t > Date.now();
+}, { message: "sendAt must be a valid ISO 8601 date-time in the future", path: ["sendAt"] });
+
+export const ListScheduledEmailsSchema = z.object({
+  maxResults: z.number().optional().default(50).describe("Maximum number of scheduled emails to return (default 50)"),
+});
+
+export const CancelScheduledEmailSchema = z.object({
+  draftId: z.string().optional().describe("Draft ID of the scheduled email to cancel (the r... value returned by schedule_email, or from list_scheduled_emails)"),
+  messageId: z.string().optional().describe("Message ID of the scheduled draft (alternative to draftId)"),
+  permanentlyDelete: z.boolean().optional().default(false).describe("If true, permanently deletes the draft. If false (default), only removes the Scheduled label so the draft reverts to a normal editable draft and will not be auto-sent."),
+}).refine(d => d.draftId || d.messageId, { message: "Provide draftId or messageId" });
+
+export const SendDueScheduledEmailsSchema = z.object({}).describe(
+  "Sends every scheduled email whose sendAt time has passed. Meant to be called on a timer (e.g. by a Cloud Scheduler job hitting this MCP endpoint every few minutes), not as part of normal email processing."
+);
+
 export const DeleteDraftSchema = z.object({
   draftId: z.string().optional().describe("Draft ID (the r... value returned by draft_email). Either draftId or messageId is required."),
   messageId: z.string().optional().describe("Message ID of the draft (as returned by search_emails with in:drafts). Resolved to the draft ID via drafts.list."),
@@ -270,6 +291,34 @@ export const toolDefinitions: ToolDefinition[] = [
     schema: SendEmailSchema,
     scopes: ["gmail.modify", "gmail.compose"],
     annotations: { title: "Draft Email", destructiveHint: false },
+  },
+  {
+    name: "schedule_email",
+    description: "Composes an email (same fields as draft_email, plus sendAt) and schedules it to send automatically at that time. Gmail's API has no native schedule-send, so this creates a draft tagged with a 'Scheduled' label and an X-Scheduled-Send-At header; a periodic sweep (send_due_scheduled_emails) sends it once due. The draft is visible and editable in Gmail like any other draft until it sends. Use list_scheduled_emails to see pending sends and cancel_scheduled_email to stop one.",
+    schema: ScheduleEmailSchema,
+    scopes: ["gmail.modify", "gmail.compose"],
+    annotations: { title: "Schedule Email", destructiveHint: false },
+  },
+  {
+    name: "list_scheduled_emails",
+    description: "Lists emails currently scheduled to send later (drafts under the 'Scheduled' label), with their target send time, recipient, and subject.",
+    schema: ListScheduledEmailsSchema,
+    scopes: ["gmail.readonly", "gmail.modify"],
+    annotations: { title: "List Scheduled Emails", readOnlyHint: true },
+  },
+  {
+    name: "cancel_scheduled_email",
+    description: "Cancels a scheduled send. By default just removes the 'Scheduled' label, leaving a normal editable draft behind; pass permanentlyDelete to remove the draft entirely.",
+    schema: CancelScheduledEmailSchema,
+    scopes: ["gmail.modify", "gmail.compose"],
+    annotations: { title: "Cancel Scheduled Email", destructiveHint: true },
+  },
+  {
+    name: "send_due_scheduled_emails",
+    description: "Sends every scheduled email whose sendAt time has passed. This is the trigger endpoint for scheduled sends: intended to be called on a timer (e.g. a Cloud Scheduler job) rather than during normal email processing.",
+    schema: SendDueScheduledEmailsSchema,
+    scopes: ["gmail.modify", "gmail.compose", "gmail.send"],
+    annotations: { title: "Send Due Scheduled Emails", destructiveHint: true, idempotentHint: true },
   },
   {
     name: "modify_email",

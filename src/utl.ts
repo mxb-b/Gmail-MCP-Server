@@ -197,6 +197,13 @@ export function createEmailMessage(validatedArgs: any): string {
         ? sanitizeHeaderValue(validatedArgs.references)
         : validatedArgs.inReplyTo ? sanitizeHeaderValue(validatedArgs.inReplyTo) : '';
 
+    // Extra headers (e.g. X-Scheduled-Send-At) that callers want carried on the raw
+    // message. Sanitized the same way as the standard headers to prevent CRLF injection.
+    const extraHeaderLines: string[] = validatedArgs.extraHeaders
+        ? Object.entries(validatedArgs.extraHeaders as Record<string, string>)
+            .map(([key, value]) => `${sanitizeHeaderValue(key)}: ${sanitizeHeaderValue(String(value))}`)
+        : [];
+
     // Common email headers
     const emailParts = [
         `From: ${from}`,
@@ -206,6 +213,7 @@ export function createEmailMessage(validatedArgs: any): string {
         `Subject: ${encodedSubject}`,
         inReplyTo ? `In-Reply-To: ${inReplyTo}` : '',
         references ? `References: ${references}` : '',
+        ...extraHeaderLines,
         'MIME-Version: 1.0',
     ].filter(Boolean);
 
@@ -326,7 +334,8 @@ export async function createEmailWithNodemailer(validatedArgs: any): Promise<str
         html: htmlBody,
         attachments: attachments,
         inReplyTo: validatedArgs.inReplyTo,
-        references: validatedArgs.references || validatedArgs.inReplyTo
+        references: validatedArgs.references || validatedArgs.inReplyTo,
+        headers: validatedArgs.extraHeaders as Record<string, string> | undefined,
     };
 
     // Generate the raw message

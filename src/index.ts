@@ -21,9 +21,10 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, DeleteDraftSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, DeleteDraftSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ScheduleEmailSchema, ListScheduledEmailsSchema, CancelScheduledEmailSchema, SendDueScheduledEmailsSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "./timeout.js";
+import { fetchScheduledDrafts, markDraftScheduled, cancelScheduledEmail, sendDueScheduledEmails, SCHEDULED_SEND_HEADER } from "./scheduled-send.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -388,7 +389,7 @@ async function main() {
             };
         }
 
-        async function handleEmailAction(action: "send" | "draft", validatedArgs: any) {
+        async function handleEmailAction(action: "send" | "draft" | "schedule", validatedArgs: any) {
             let message: string;
 
             try {
@@ -507,23 +508,35 @@ async function main() {
                             ],
                         };
                     } else {
-                        // For drafts with attachments, use the raw message
+                        // For drafts (and scheduled sends) with attachments, use the raw message
                         const encodedMessage = Buffer.from(message).toString('base64')
                             .replace(/\+/g, '-')
                             .replace(/\//g, '_')
                             .replace(/=+$/, '');
-                        
+
                         const messageRequest = {
                             raw: encodedMessage,
                             ...(validatedArgs.threadId && { threadId: validatedArgs.threadId })
                         };
-                        
+
                         const response = await withTimeout(gmail.users.drafts.create({
                             userId: 'me',
                             requestBody: {
                                 message: messageRequest,
                             },
                         }), DEFAULT_TIMEOUT_MS, 'drafts.create with attachments');
+
+                        if (action === "schedule") {
+                            await markDraftScheduled(gmail, response.data.message!.id!);
+                            return {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: `Email scheduled successfully. Draft ID: ${response.data.id}. Will send at ${validatedArgs.sendAt} (visible and editable in Gmail under the "Scheduled" label until then).`,
+                                    },
+                                ],
+                            };
+                        }
                         return {
                             content: [
                                 {
@@ -577,6 +590,18 @@ async function main() {
                                 message: messageRequest,
                         },
                         }), DEFAULT_TIMEOUT_MS, 'drafts.create');
+
+                        if (action === "schedule") {
+                            await markDraftScheduled(gmail, response.data.message!.id!);
+                            return {
+                                content: [
+                                    {
+                                        type: "text",
+                                        text: `Email scheduled successfully. Draft ID: ${response.data.id}. Will send at ${validatedArgs.sendAt} (visible and editable in Gmail under the "Scheduled" label until then).`,
+                                    },
+                                ],
+                            };
+                        }
                         return {
                             content: [
                                 {
@@ -637,6 +662,63 @@ async function main() {
                     }
                     const action = name === "send_email" ? "send" : "draft";
                     return await handleEmailAction(action, validatedArgs);
+                }
+
+                case "schedule_email": {
+                    const validatedArgs = ScheduleEmailSchema.parse(args);
+                    if (validatedArgs.skipQuote) {
+                        (validatedArgs as any)._skipQuote = true;
+                    }
+                    // Stamp the resolved send time onto the raw message as a custom header.
+                    // This is what send_due_scheduled_emails reads to decide when to fire;
+                    // it is the only piece of scheduling state not carried by the "Scheduled" label.
+                    (validatedArgs as any).extraHeaders = {
+                        ...(validatedArgs as any).extraHeaders,
+                        [SCHEDULED_SEND_HEADER]: new Date(validatedArgs.sendAt).toISOString(),
+                    };
+                    return await handleEmailAction("schedule", validatedArgs);
+                }
+
+                case "list_scheduled_emails": {
+                    const validatedArgs = ListScheduledEmailsSchema.parse(args);
+                    const scheduled = await fetchScheduledDrafts(gmail, validatedArgs.maxResults);
+                    if (scheduled.length === 0) {
+                        return { content: [{ type: "text", text: "No emails currently scheduled." }] };
+                    }
+                    const text = scheduled.map(s =>
+                        `Draft ID: ${s.draftId}\nSend at: ${s.sendAt || '(unparseable/missing X-Scheduled-Send-At header)'}\nTo: ${s.to}\nSubject: ${s.subject}\n`
+                    ).join('\n');
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: `${scheduled.length} scheduled email(s):\n\n${text}`,
+                            },
+                        ],
+                    };
+                }
+
+                case "cancel_scheduled_email": {
+                    const validatedArgs = CancelScheduledEmailSchema.parse(args);
+                    const result = await cancelScheduledEmail(gmail, validatedArgs);
+                    const text = result.action === "deleted"
+                        ? `Scheduled email ${result.draftId} permanently deleted.`
+                        : `Scheduled email ${result.draftId} unscheduled: the "Scheduled" label was removed and it is now a normal editable draft that will not auto-send.`;
+                    return { content: [{ type: "text", text }] };
+                }
+
+                case "send_due_scheduled_emails": {
+                    SendDueScheduledEmailsSchema.parse(args);
+                    const result = await sendDueScheduledEmails(gmail);
+                    const lines = [
+                        `Sent: ${result.sent.length}`,
+                        ...result.sent.map(s => `  - ${s.draftId} -> ${s.to} "${s.subject}" (was due ${s.sendAt})`),
+                        `Still pending: ${result.stillPending.length}`,
+                        ...result.stillPending.map(s => `  - ${s.draftId} -> ${s.to} "${s.subject}" (due ${s.sendAt || 'unknown'})`),
+                        `Errors: ${result.errors.length}`,
+                        ...result.errors.map(e => `  - ${e.draftId}: ${e.error}`),
+                    ];
+                    return { content: [{ type: "text", text: lines.join('\n') }] };
                 }
 
                 case "read_email": {
