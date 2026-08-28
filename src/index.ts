@@ -21,10 +21,11 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, DeleteDraftSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ScheduleEmailSchema, ListScheduledEmailsSchema, CancelScheduledEmailSchema, SendDueScheduledEmailsSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SearchContactsSchema, GetContactPhotoSchema, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, DeleteDraftSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ScheduleEmailSchema, ListScheduledEmailsSchema, CancelScheduledEmailSchema, SendDueScheduledEmailsSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "./timeout.js";
 import { fetchScheduledDrafts, markDraftScheduled, cancelScheduledEmail, sendDueScheduledEmails, SCHEDULED_SEND_HEADER } from "./scheduled-send.js";
+import { searchContacts, getContactPhoto } from "./people.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -1843,6 +1844,43 @@ async function main() {
                                 text: `Reply-all sent successfully!\nTo: ${replyTo.join(', ')}${replyCc.length > 0 ? `\nCC: ${replyCc.join(', ')}` : ''}\nSubject: ${replySubject}\nThread ID: ${threadId}`,
                             },
                         ],
+                    };
+                }
+
+                case "search_contacts": {
+                    const validatedArgs = SearchContactsSchema.parse(args);
+                    const result = await searchContacts(oauth2Client, {
+                        query: validatedArgs.query,
+                        maxResults: validatedArgs.maxResults,
+                    });
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify(result, null, 2),
+                            },
+                        ],
+                        structuredContent: result,
+                    };
+                }
+
+                case "get_contact_photo": {
+                    const validatedArgs = GetContactPhotoSchema.parse(args);
+                    const result = await getContactPhoto(oauth2Client, {
+                        email: validatedArgs.email,
+                        size: validatedArgs.size,
+                        mode: validatedArgs.mode,
+                    });
+                    // Mirrors download_attachment: the full payload goes in both the text
+                    // block and structuredContent, since not every client reads the latter.
+                    return {
+                        content: [
+                            {
+                                type: "text",
+                                text: JSON.stringify(result),
+                            },
+                        ],
+                        structuredContent: result,
                     };
                 }
 

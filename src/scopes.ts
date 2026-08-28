@@ -1,6 +1,6 @@
-// Gmail API OAuth2 scope definitions and helpers
+// Gmail and People API OAuth2 scope definitions and helpers
 //
-// Scope hierarchy (for reference):
+// Gmail scope hierarchy (for reference):
 //   - gmail.readonly: Read-only access to emails
 //   - gmail.modify: Read AND write access (superset of readonly)
 //   - gmail.compose: Create drafts and send emails
@@ -10,6 +10,16 @@
 //
 // Note: gmail.modify includes all capabilities of gmail.readonly,
 // so you don't need both scopes together.
+//
+// People API scopes (used by search_contacts and get_contact_photo):
+//   - contacts.readonly: Read the user's saved contacts
+//   - contacts.other.readonly: Read "other contacts", the addresses the user has
+//     emailed but never saved as a contact
+//   - directory.readonly: Read the Workspace domain directory (colleagues)
+//
+// These three are independent of each other and of the Gmail scopes: each one
+// only unlocks its own People API source, and any of them can be missing without
+// breaking the others.
 
 // Map shorthand scope names to full Google API URLs
 export const SCOPE_MAP: Record<string, string> = {
@@ -20,6 +30,9 @@ export const SCOPE_MAP: Record<string, string> = {
   "gmail.labels": "https://www.googleapis.com/auth/gmail.labels",
   "gmail.settings.basic": "https://www.googleapis.com/auth/gmail.settings.basic",
   "gmail.settings.sharing": "https://www.googleapis.com/auth/gmail.settings.sharing",
+  "contacts.readonly": "https://www.googleapis.com/auth/contacts.readonly",
+  "contacts.other.readonly": "https://www.googleapis.com/auth/contacts.other.readonly",
+  "directory.readonly": "https://www.googleapis.com/auth/directory.readonly",
 };
 
 // Reverse map for converting full URLs back to shorthand
@@ -27,8 +40,14 @@ export const SCOPE_REVERSE_MAP: Record<string, string> = Object.fromEntries(
   Object.entries(SCOPE_MAP).map(([short, full]) => [full, short])
 );
 
-// Default scopes (original behavior)
-export const DEFAULT_SCOPES = ["gmail.modify", "gmail.settings.basic"];
+// Default scopes (original Gmail behavior plus read-only People lookup)
+export const DEFAULT_SCOPES = [
+  "gmail.modify",
+  "gmail.settings.basic",
+  "contacts.readonly",
+  "contacts.other.readonly",
+  "directory.readonly",
+];
 
 // Convert shorthand scope name to full Google API URL
 // e.g., "gmail.readonly" -> "https://www.googleapis.com/auth/gmail.readonly"

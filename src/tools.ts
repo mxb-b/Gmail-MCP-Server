@@ -205,6 +205,18 @@ export const ReplyAllSchema = z.object({
   attachments: z.array(AttachmentInputSchema).optional().describe(ATTACHMENTS_DESCRIPTION),
 });
 
+// People API schemas (contact and directory lookup)
+export const SearchContactsSchema = z.object({
+  query: z.string().describe("Name or email prefix to look up, e.g. 'Hadeer' or 'elsamalotyh@parkschool.org'. People API matches prefix phrases, so partial names work."),
+  maxResults: z.number().optional().default(10).describe("Maximum number of people to return after de-duplication (default 10)"),
+});
+
+export const GetContactPhotoSchema = z.object({
+  email: z.string().describe("Email address of the person whose profile photo you want"),
+  size: z.number().optional().default(512).describe("Requested photo width/height in pixels (default 512)"),
+  mode: z.enum(['url', 'base64']).optional().default('url').describe("'url' returns the sized photo URL only; 'base64' also fetches the bytes server-side and returns them inline"),
+});
+
 // Tool definition type
 export interface ToolAnnotations {
   title: string;
@@ -437,6 +449,22 @@ export const toolDefinitions: ToolDefinition[] = [
     schema: ReplyAllSchema,
     scopes: ["gmail.modify", "gmail.compose", "gmail.send"],
     annotations: { title: "Reply All", destructiveHint: false },
+  },
+
+  // People operations (Workspace directory, saved contacts, other contacts)
+  {
+    name: "search_contacts",
+    description: "Looks up people by name or email across three sources: the Google Workspace domain directory (colleagues), the user's saved contacts, and 'other contacts' (addresses the user has emailed but never saved). Results are merged and de-duplicated by email, each carrying the person's display name, all known emails, their profile photo URL, and which source matched. Any source that is unavailable (missing scope, People API not enabled) is skipped and noted in the 'warnings' array rather than failing the call.",
+    schema: SearchContactsSchema,
+    scopes: ["directory.readonly", "contacts.readonly", "contacts.other.readonly"],
+    annotations: { title: "Search Contacts", readOnlyHint: true },
+  },
+  {
+    name: "get_contact_photo",
+    description: "Fetches a person's Google account profile photo by email address. Returns the photo URL sized to the requested pixel dimension; with mode='base64' it also fetches the image bytes server-side and returns them inline. Errors clearly when the person cannot be found or has only Google's default placeholder avatar rather than a real photo.",
+    schema: GetContactPhotoSchema,
+    scopes: ["directory.readonly", "contacts.readonly", "contacts.other.readonly"],
+    annotations: { title: "Get Contact Photo", readOnlyHint: true },
   },
 ];
 
