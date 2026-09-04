@@ -23,6 +23,7 @@
 - **Download email tool** — `download_email` saves emails to disk in json/eml/txt/html formats without consuming LLM context ([PR #13](https://github.com/ArtyMcLabin/Gmail-MCP-Server/pull/13) by [@icanhasjonas](https://github.com/icanhasjonas))
 - **Inline attachments** — attach and download files without touching the server's filesystem: `send_email`/`draft_email`/`reply_all` accept attachment bytes directly as base64, and `download_attachment` can return extracted text (PDF/DOCX/XLSX/CSV/etc.) or raw base64 inline instead of writing to disk. Essential for servers running on remote infrastructure like Cloud Run. See [Inline attachments](#inline-attachments) below.
 - **Scheduled send**: `schedule_email`, `list_scheduled_emails`, and `cancel_scheduled_email` let you queue an email to send at a future time, since the Gmail API itself has no schedule-send endpoint. Built entirely on existing Gmail primitives (a labeled draft plus a custom header), no external database required. See tools 21-24 below.
+- **One draft per thread (opt-in)** — `draft_email` accepts an optional `replaceThreadDrafts` flag (default `false`). When set and `threadId` is provided, it deletes every existing draft on that thread for the account before creating the new one, so at most one draft remains per thread. **This is off by default and must be explicitly requested**, because it deletes ALL matching drafts, including a human's own in-progress draft on the same thread, not just drafts this tool created. See [One draft per thread](#one-draft-per-thread-replacethreaddrafts) below.
 
 All features are production-tested in daily use.
 
@@ -375,6 +376,27 @@ Creates a draft email without sending it. **Also supports attachments**.
   "attachments": ["/path/to/draft_report.docx"]
 }
 ```
+
+#### One draft per thread (`replaceThreadDrafts`)
+
+By default, calling `draft_email` repeatedly on the same `threadId` creates a new draft each time, leaving multiple drafts stacked on one thread. Pass `replaceThreadDrafts: true` to instead delete every existing draft on that thread before the new one is created:
+
+```json
+{
+  "to": ["recipient@example.com"],
+  "subject": "Re: Draft Report",
+  "body": "Updated version attached.",
+  "threadId": "18abc...",
+  "inReplyTo": "<message-id@mail.gmail.com>",
+  "replaceThreadDrafts": true
+}
+```
+
+- **Default is `false`; existing behavior is unchanged unless you opt in.**
+- Only applies when `threadId` is provided. If `threadId` is absent there's no thread to scope the replacement to, so the flag is a no-op (the list/delete step is skipped entirely rather than deleting unrelated drafts).
+- **Safety note**: this deletes *all* of the authenticated user's drafts on the thread, not just drafts this tool previously created. If a human has their own in-progress draft on that same thread, it will be deleted too. That's why this defaults to off — only pass `true` when you specifically want "one draft per thread" enforced and understand that tradeoff.
+- The Gmail API has no server-side way to filter `drafts.list` by `threadId` (its `q` param only supports normal Gmail search syntax), so this works by listing all of the account's drafts, paginating via `nextPageToken`, and filtering client-side on each draft's `message.threadId` (present by default in the `drafts.list` response, no extra `drafts.get` calls needed) before deleting the matches via `drafts.delete`.
+- The response lists any drafts that were replaced, e.g. `Replaced 1 existing draft(s) on this thread:\n  - draft r123... (message 18abc...)`. If none matched, nothing is added to the response.
 
 ### 3. Read Email (`read_email`)
 Retrieves the content of a specific email by its ID. **Now shows enhanced attachment information**.
