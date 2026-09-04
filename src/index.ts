@@ -21,7 +21,7 @@ import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, get
 import { createFilter, listFilters, getFilter, deleteFilter, filterTemplates, GmailFilterCriteria, GmailFilterAction } from "./filter-manager.js";
 import { parseEmailAddresses, filterOutEmail, addRePrefix, buildReferencesHeader, buildReplyAllRecipients } from "./reply-all-helpers.js";
 import { DEFAULT_SCOPES, scopeNamesToUrls, parseScopes, validateScopes, hasScope, getAvailableScopeNames } from "./scopes.js";
-import { toolDefinitions, toMcpTools, getToolByName, SearchContactsSchema, GetContactPhotoSchema, SendEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, DeleteDraftSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ScheduleEmailSchema, ListScheduledEmailsSchema, CancelScheduledEmailSchema, SendDueScheduledEmailsSchema } from "./tools.js";
+import { toolDefinitions, toMcpTools, getToolByName, SearchContactsSchema, GetContactPhotoSchema, SendEmailSchema, DraftEmailSchema, ReadEmailSchema, SearchEmailsSchema, ModifyEmailSchema, DeleteEmailSchema, DeleteDraftSchema, BatchModifyEmailsSchema, BatchDeleteEmailsSchema, CreateLabelSchema, UpdateLabelSchema, DeleteLabelSchema, GetOrCreateLabelSchema, CreateFilterSchema, GetFilterSchema, DeleteFilterSchema, CreateFilterFromTemplateSchema, DownloadAttachmentSchema, ReplyAllSchema, GetThreadSchema, ListInboxThreadsSchema, GetInboxWithThreadsSchema, DownloadEmailSchema, ScheduleEmailSchema, ListScheduledEmailsSchema, CancelScheduledEmailSchema, SendDueScheduledEmailsSchema } from "./tools.js";
 import { gmailMessageToJson, emailToTxt, emailToHtml, EmailAttachment } from "./email-export.js";
 import { withTimeout, DEFAULT_TIMEOUT_MS } from "./timeout.js";
 import { fetchScheduledDrafts, markDraftScheduled, cancelScheduledEmail, sendDueScheduledEmails, SCHEDULED_SEND_HEADER } from "./scheduled-send.js";
@@ -622,6 +622,42 @@ async function main() {
             }
         }
 
+        // Deletes every existing draft on the given thread, for draft_email's replaceThreadDrafts option.
+        // The Gmail API has no server-side "drafts on this thread" filter (drafts.list's q param uses
+        // normal Gmail search syntax, which doesn't support filtering by threadId), so this lists all of
+        // the account's drafts, paginating via nextPageToken, and filters client-side on
+        // draft.message.threadId -- the drafts.list response includes message.id and message.threadId for
+        // each draft by default (see Schema$ListDraftsResponse), so no extra drafts.get calls are needed.
+        // Note: this deletes ALL matching drafts, including ones not created by this tool (e.g. a human's
+        // own in-progress draft on the same thread) -- that's why the caller only reaches here when
+        // replaceThreadDrafts was explicitly requested.
+        async function deleteThreadDrafts(threadId: string): Promise<{ draftId: string; messageId: string }[]> {
+            const matches: { draftId: string; messageId: string }[] = [];
+            let pageToken: string | undefined = undefined;
+            do {
+                const page: any = await withTimeout(gmail.users.drafts.list({
+                    userId: 'me',
+                    maxResults: 100,
+                    pageToken,
+                }), DEFAULT_TIMEOUT_MS, 'drafts.list for replaceThreadDrafts');
+                for (const d of (page.data.drafts || [])) {
+                    if (d.message?.threadId === threadId && d.id && d.message?.id) {
+                        matches.push({ draftId: d.id, messageId: d.message.id });
+                    }
+                }
+                pageToken = page.data.nextPageToken || undefined;
+            } while (pageToken);
+
+            for (const match of matches) {
+                await withTimeout(gmail.users.drafts.delete({
+                    userId: 'me',
+                    id: match.draftId,
+                }), DEFAULT_TIMEOUT_MS, 'drafts.delete for replaceThreadDrafts');
+            }
+
+            return matches;
+        }
+
         // Helper function to process operations in batches
         async function processBatches<T, U>(
             items: T[],
@@ -657,12 +693,30 @@ async function main() {
             switch (name) {
                 case "send_email":
                 case "draft_email": {
-                    const validatedArgs = SendEmailSchema.parse(args);
+                    const isDraft = name === "draft_email";
+                    const validatedArgs = isDraft ? DraftEmailSchema.parse(args) : SendEmailSchema.parse(args);
                     if (validatedArgs.skipQuote) {
                         (validatedArgs as any)._skipQuote = true;
                     }
-                    const action = name === "send_email" ? "send" : "draft";
-                    return await handleEmailAction(action, validatedArgs);
+                    const action = isDraft ? "draft" : "send";
+
+                    // Opt-in one-draft-per-thread: replace any existing drafts on this thread before
+                    // creating the new one. No-op (explicitly skipped, not just naturally empty) when
+                    // there's no threadId to scope the replacement to.
+                    let replacedDrafts: { draftId: string; messageId: string }[] = [];
+                    const wantsReplace = isDraft && (validatedArgs as any).replaceThreadDrafts === true;
+                    if (wantsReplace && validatedArgs.threadId) {
+                        replacedDrafts = await deleteThreadDrafts(validatedArgs.threadId);
+                    }
+
+                    const result = await handleEmailAction(action, validatedArgs);
+                    if (replacedDrafts.length > 0 && result.content?.[0]?.type === "text") {
+                        const summary = replacedDrafts
+                            .map(d => `  - draft ${d.draftId} (message ${d.messageId})`)
+                            .join('\n');
+                        result.content[0].text += `\n\nReplaced ${replacedDrafts.length} existing draft(s) on this thread:\n${summary}`;
+                    }
+                    return result;
                 }
 
                 case "schedule_email": {
