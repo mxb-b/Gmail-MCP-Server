@@ -631,7 +631,7 @@ async function main() {
         // Note: this deletes ALL matching drafts, including ones not created by this tool (e.g. a human's
         // own in-progress draft on the same thread) -- that's why the caller only reaches here when
         // replaceThreadDrafts was explicitly requested.
-        async function deleteThreadDrafts(threadId: string, excludeDraftId?: string): Promise<{ draftId: string; messageId: string }[]> {
+        async function trashThreadDrafts(threadId: string, excludeDraftId?: string): Promise<{ draftId: string; messageId: string; subject: string; snippet: string }[]> {
             const matches: { draftId: string; messageId: string }[] = [];
             let pageToken: string | undefined = undefined;
             do {
@@ -648,14 +648,34 @@ async function main() {
                 pageToken = page.data.nextPageToken || undefined;
             } while (pageToken);
 
+            const replaced: { draftId: string; messageId: string; subject: string; snippet: string }[] = [];
             for (const match of matches) {
-                await withTimeout(gmail.users.drafts.delete({
+                // Capture the subject and a short preview BEFORE removing, so the caller is told what it
+                // replaced (not just an id) and a replacement is never silent.
+                let subject = '';
+                let snippet = '';
+                try {
+                    const meta: any = await withTimeout(gmail.users.messages.get({
+                        userId: 'me',
+                        id: match.messageId,
+                        format: 'metadata',
+                        metadataHeaders: ['Subject'],
+                    }), DEFAULT_TIMEOUT_MS, 'messages.get for replaceThreadDrafts');
+                    snippet = meta.data.snippet || '';
+                    const hdr = (meta.data.payload?.headers || []).find((h: any) => (h.name || '').toLowerCase() === 'subject');
+                    subject = hdr?.value || '';
+                } catch {
+                    // Non-fatal: proceed with whatever metadata we have.
+                }
+                // Move to Trash (recoverable) rather than permanently deleting, so an accidentally
+                // replaced human draft can be restored.
+                await withTimeout(gmail.users.messages.trash({
                     userId: 'me',
-                    id: match.draftId,
-                }), DEFAULT_TIMEOUT_MS, 'drafts.delete for replaceThreadDrafts');
+                    id: match.messageId,
+                }), DEFAULT_TIMEOUT_MS, 'messages.trash for replaceThreadDrafts');
+                replaced.push({ draftId: match.draftId, messageId: match.messageId, subject, snippet });
             }
-
-            return matches;
+            return replaced;
         }
 
         // Helper function to process operations in batches
@@ -700,29 +720,31 @@ async function main() {
                     }
                     const action = isDraft ? "draft" : "send";
 
-                    // Opt-in one-draft-per-thread: replace any existing drafts on this thread before
-                    // creating the new one. No-op (explicitly skipped, not just naturally empty) when
-                    // there's no threadId to scope the replacement to.
-                    // Create the new draft FIRST, then remove the OTHER drafts on the thread.
-                    // A delete-then-create order can empty a draft-only thread, which then makes it
-                    // vanish so the create fails; creating first keeps the thread alive, and if the
-                    // create throws nothing is deleted.
+                    // Opt-in one-draft-per-thread (draft_email only). Create the new draft FIRST, then
+                    // move the OTHER drafts on the thread to Trash. Creating first keeps the thread alive
+                    // (a delete-then-create order can empty a draft-only thread, which then vanishes and the
+                    // create fails); if the create throws, nothing is touched. No-op without a threadId.
                     const result = await handleEmailAction(action, validatedArgs);
 
-                    let replacedDrafts: { draftId: string; messageId: string }[] = [];
+                    let replacedDrafts: { draftId: string; messageId: string; subject: string; snippet: string }[] = [];
                     const wantsReplace = isDraft && (validatedArgs as any).replaceThreadDrafts === true;
                     if (wantsReplace && validatedArgs.threadId) {
-                        // Exclude the draft we just created (its id is in the success text) so it is not deleted.
+                        // Exclude the draft we just created (its id is in the success text) so it is not removed.
                         const createdText = result.content?.[0]?.type === "text" ? result.content[0].text : "";
                         const idMatch = createdText.match(/ID:\s*(\S+)/);
                         const newDraftId = idMatch ? idMatch[1] : undefined;
-                        replacedDrafts = await deleteThreadDrafts(validatedArgs.threadId, newDraftId);
+                        replacedDrafts = await trashThreadDrafts(validatedArgs.threadId, newDraftId);
                     }
                     if (replacedDrafts.length > 0 && result.content?.[0]?.type === "text") {
                         const summary = replacedDrafts
-                            .map(d => `  - draft ${d.draftId} (message ${d.messageId})`)
+                            .map(d => {
+                                const subj = d.subject || "(no subject)";
+                                const preview = (d.snippet || "").slice(0, 100);
+                                const tail = d.snippet && d.snippet.length > 100 ? "\u2026" : "";
+                                return `  - "${subj}"${preview ? ` \u2014 ${preview}${tail}` : ""} [draft ${d.draftId}, message ${d.messageId}]`;
+                            })
                             .join('\n');
-                        result.content[0].text += `\n\nReplaced ${replacedDrafts.length} existing draft(s) on this thread:\n${summary}`;
+                        result.content[0].text += `\n\nMoved ${replacedDrafts.length} existing draft(s) on this thread to Trash (recoverable):\n${summary}`;
                     }
                     return result;
                 }
