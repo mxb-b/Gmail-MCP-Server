@@ -31,7 +31,7 @@ export const SendEmailSchema = z.object({
 });
 
 export const DraftEmailSchema = SendEmailSchema.extend({
-  replaceThreadDrafts: z.boolean().optional().default(false).describe("If true and threadId is set, deletes ALL of the authenticated user's existing drafts on that thread (via drafts.list + drafts.delete) before creating the new one, so at most one draft remains on the thread. This also deletes a human's own in-progress draft on the same thread, not just prior agent drafts, so it is opt-in and defaults to false. No-op if threadId is not provided (there is no thread to scope the replacement to). The response lists any drafts that were replaced."),
+  replaceThreadDrafts: z.boolean().optional().default(false).describe("If true and threadId is set, creates the new draft, then deletes the authenticated user's OTHER existing drafts on that thread (via drafts.list + drafts.delete), so at most one draft remains on the thread. This also deletes a human's own in-progress draft on the same thread, not just prior agent drafts, so it is opt-in and defaults to false. No-op if threadId is not provided (there is no thread to scope the replacement to). The response lists any drafts that were replaced."),
 });
 
 export const ReadEmailSchema = z.object({
@@ -303,7 +303,7 @@ export const toolDefinitions: ToolDefinition[] = [
   },
   {
     name: "draft_email",
-    description: "Draft a new email. Optional replaceThreadDrafts (default false): when true and threadId is set, deletes every existing draft on that thread for this account before creating the new one, so only one draft remains per thread. This deletes ANY draft on the thread, including one a human is mid-way through writing, which is why it is opt-in.",
+    description: "Draft a new email. Optional replaceThreadDrafts (default false): when true and threadId is set, creates the new draft and then deletes this account's other existing drafts on that thread, so only one draft remains per thread. This deletes ANY draft on the thread, including one a human is mid-way through writing, which is why it is opt-in.",
     schema: DraftEmailSchema,
     scopes: ["gmail.modify", "gmail.compose"],
     annotations: { title: "Draft Email", destructiveHint: false },

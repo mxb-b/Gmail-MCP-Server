@@ -631,7 +631,7 @@ async function main() {
         // Note: this deletes ALL matching drafts, including ones not created by this tool (e.g. a human's
         // own in-progress draft on the same thread) -- that's why the caller only reaches here when
         // replaceThreadDrafts was explicitly requested.
-        async function deleteThreadDrafts(threadId: string): Promise<{ draftId: string; messageId: string }[]> {
+        async function deleteThreadDrafts(threadId: string, excludeDraftId?: string): Promise<{ draftId: string; messageId: string }[]> {
             const matches: { draftId: string; messageId: string }[] = [];
             let pageToken: string | undefined = undefined;
             do {
@@ -641,7 +641,7 @@ async function main() {
                     pageToken,
                 }), DEFAULT_TIMEOUT_MS, 'drafts.list for replaceThreadDrafts');
                 for (const d of (page.data.drafts || [])) {
-                    if (d.message?.threadId === threadId && d.id && d.message?.id) {
+                    if (d.message?.threadId === threadId && d.id && d.message?.id && d.id !== excludeDraftId) {
                         matches.push({ draftId: d.id, messageId: d.message.id });
                     }
                 }
@@ -703,13 +703,21 @@ async function main() {
                     // Opt-in one-draft-per-thread: replace any existing drafts on this thread before
                     // creating the new one. No-op (explicitly skipped, not just naturally empty) when
                     // there's no threadId to scope the replacement to.
+                    // Create the new draft FIRST, then remove the OTHER drafts on the thread.
+                    // A delete-then-create order can empty a draft-only thread, which then makes it
+                    // vanish so the create fails; creating first keeps the thread alive, and if the
+                    // create throws nothing is deleted.
+                    const result = await handleEmailAction(action, validatedArgs);
+
                     let replacedDrafts: { draftId: string; messageId: string }[] = [];
                     const wantsReplace = isDraft && (validatedArgs as any).replaceThreadDrafts === true;
                     if (wantsReplace && validatedArgs.threadId) {
-                        replacedDrafts = await deleteThreadDrafts(validatedArgs.threadId);
+                        // Exclude the draft we just created (its id is in the success text) so it is not deleted.
+                        const createdText = result.content?.[0]?.type === "text" ? result.content[0].text : "";
+                        const idMatch = createdText.match(/ID:\s*(\S+)/);
+                        const newDraftId = idMatch ? idMatch[1] : undefined;
+                        replacedDrafts = await deleteThreadDrafts(validatedArgs.threadId, newDraftId);
                     }
-
-                    const result = await handleEmailAction(action, validatedArgs);
                     if (replacedDrafts.length > 0 && result.content?.[0]?.type === "text") {
                         const summary = replacedDrafts
                             .map(d => `  - draft ${d.draftId} (message ${d.messageId})`)
