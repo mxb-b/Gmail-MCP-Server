@@ -14,7 +14,7 @@ import { fileURLToPath } from 'url';
 import http from 'http';
 import open from 'open';
 import os from 'os';
-import {createEmailMessage, createEmailWithNodemailer, buildPlainTextQuote, buildHtmlQuote} from "./utl.js";
+import {createEmailMessage, createEmailWithNodemailer, buildPlainTextQuote, buildHtmlQuote, htmlToPlainText, plainTextToHtml, isHtml, pickQuotableMessage} from "./utl.js";
 import { extractAttachmentText } from "./attachment-extract.js";
 import { extension as mimeExtension } from "mime-types";
 import { createLabel, updateLabel, deleteLabel, listLabels, findLabelByName, getOrCreateLabel, GmailLabel } from "./label-manager.js";
@@ -404,7 +404,14 @@ async function main() {
                             metadataHeaders: ['Message-ID'],
                         }), DEFAULT_TIMEOUT_MS, 'threads.get for header resolution');
 
-                        const threadMessages = threadResponse.data.messages || [];
+                        // Drafts and trashed messages are not part of the conversation:
+                        // they must not supply In-Reply-To or enter the References chain.
+                        const threadMessages = (threadResponse.data.messages || []).filter(
+                            (m) => {
+                                const labels = m.labelIds || [];
+                                return !labels.includes('DRAFT') && !labels.includes('TRASH');
+                            }
+                        );
                         if (threadMessages.length > 0) {
                             // Collect all Message-ID values for the References chain
                             const allMessageIds: string[] = [];
@@ -418,7 +425,7 @@ async function main() {
                                 }
                             }
 
-                            // Last message's Message-ID becomes In-Reply-To
+                            // Last real message's Message-ID becomes In-Reply-To
                             const lastMessage = threadMessages[threadMessages.length - 1];
                             const lastHeaders = lastMessage.payload?.headers || [];
                             const lastMessageId = lastHeaders.find(
@@ -447,9 +454,8 @@ async function main() {
                             format: 'full',
                         }), DEFAULT_TIMEOUT_MS, 'threads.get for quote');
 
-                        const threadMessages = threadForQuote.data.messages || [];
-                        if (threadMessages.length > 0) {
-                            const lastMsg = threadMessages[threadMessages.length - 1];
+                        const lastMsg = pickQuotableMessage(threadForQuote.data.messages || []);
+                        if (lastMsg) {
                             const lastHeaders = lastMsg.payload?.headers || [];
                             const quotedFrom = lastHeaders.find(h => h.name?.toLowerCase() === 'from')?.value || '';
                             const quotedDate = lastHeaders.find(h => h.name?.toLowerCase() === 'date')?.value || '';
@@ -457,20 +463,43 @@ async function main() {
                             const { text: quotedText, html: quotedHtml } = extractEmailContent(lastMsg.payload as GmailMessagePart || {});
 
                             if (quotedText || quotedHtml) {
-                                // Append plain text quote
-                                const textBody = quotedText || quotedHtml.replace(/<[^>]+>/g, '');
-                                validatedArgs.body = validatedArgs.body + buildPlainTextQuote(quotedFrom, quotedDate, textBody);
+                                // The reply body BEFORE any quote is appended. The HTML
+                                // alternative has to be built from this, never from the
+                                // already-quoted text, or plainTextToHtml escapes the
+                                // "> " markers into "&gt;" and Gmail gets no gmail_quote
+                                // block to collapse.
+                                const replyBodyBeforeQuote = validatedArgs.body;
 
-                                // Append HTML quote
-                                if (validatedArgs.htmlBody) {
-                                    // Insert before closing </body></html> if present
-                                    validatedArgs.htmlBody = validatedArgs.htmlBody.replace(
-                                        /<\/body>\s*<\/html>\s*$/i,
-                                        buildHtmlQuote(quotedFrom, quotedDate, quotedHtml, quotedText) + '</body></html>'
-                                    );
-                                    // If no closing tags matched, just append
-                                    if (!validatedArgs.htmlBody.includes('gmail_quote')) {
-                                        validatedArgs.htmlBody = validatedArgs.htmlBody + buildHtmlQuote(quotedFrom, quotedDate, quotedHtml, quotedText);
+                                // Plain text quote. When the previous message is HTML-only
+                                // (Apple Mail, iOS Mail, most webmail) a bare tag strip drops
+                                // every line break and leaks raw &nbsp; / &lt; / &gt; entities
+                                // into the quote, and the damage compounds on each reply.
+                                // htmlToPlainText converts breaks and decodes entities.
+                                const textBody = quotedText || htmlToPlainText(quotedHtml);
+                                validatedArgs.body = replyBodyBeforeQuote + buildPlainTextQuote(quotedFrom, quotedDate, textBody);
+
+                                // HTML quote. Always emit one unless the caller explicitly
+                                // asked for a text/plain-only message: previously this was
+                                // skipped whenever htmlBody was absent, which is the normal
+                                // plain-text caller, so the HTML alternative ended up as
+                                // escaped "&gt;" lines instead of a real quote block.
+                                if (validatedArgs.mimeType !== 'text/plain') {
+                                    if (!validatedArgs.htmlBody) {
+                                        validatedArgs.htmlBody = isHtml(replyBodyBeforeQuote)
+                                            ? replyBodyBeforeQuote
+                                            : plainTextToHtml(replyBodyBeforeQuote);
+                                        // createEmailMessage only upgrades to multipart when
+                                        // htmlBody is absent, so say so explicitly now.
+                                        validatedArgs.mimeType = 'multipart/alternative';
+                                    }
+                                    const htmlQuote = buildHtmlQuote(quotedFrom, quotedDate, quotedHtml, textBody);
+                                    if (/<\/body>\s*<\/html>\s*$/i.test(validatedArgs.htmlBody)) {
+                                        validatedArgs.htmlBody = validatedArgs.htmlBody.replace(
+                                            /<\/body>\s*<\/html>\s*$/i,
+                                            htmlQuote + '</body></html>'
+                                        );
+                                    } else {
+                                        validatedArgs.htmlBody = validatedArgs.htmlBody + htmlQuote;
                                     }
                                 }
                             }
