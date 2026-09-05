@@ -204,18 +204,26 @@ export function htmlToPlainText(html: string): string {
  * HTML entities are escaped.
  */
 export function plainTextToHtml(text: string): string {
-    // Escape HTML entities
-    const escaped = text
+    const escape = (s: string) => s
         .replace(/&/g, '&amp;')
         .replace(/</g, '&lt;')
         .replace(/>/g, '&gt;')
         .replace(/"/g, '&quot;');
 
-    // Split into paragraphs on double newlines, then convert single newlines to <br>
-    const paragraphs = escaped.split(/\n\n+/).map(p => p.trim()).filter(Boolean);
-    const htmlBody = paragraphs.map(p => `<p style="margin:0 0 16px 0;">${p.replace(/\n/g, '<br>')}</p>`).join('\n');
+    // One <div> per line, <div><br></div> for a blank line, all inside a single
+    // <div dir="ltr">. That is exactly what the Gmail web composer emits, verified
+    // against a reply Jordan sent by hand on 2026-09-03 ("Re: heading over").
+    //
+    // The previous shape wrapped everything in
+    // <html><body style="font-family:sans-serif;font-size:14px;color:#222;"> with
+    // <p style="margin:0 0 16px 0;"> paragraphs. That forced a sans-serif override
+    // onto the quoted history too, so a reply never looked like Gmail's own.
+    const body = text
+        .split('\n')
+        .map(line => (line.trim() === '' ? '<div><br></div>' : `<div>${escape(line)}</div>`))
+        .join('');
 
-    return `<html><body style="font-family:sans-serif;font-size:14px;color:#222;">${htmlBody}</body></html>`;
+    return `<div dir="ltr">${body}</div>`;
 }
 
 export function createEmailMessage(validatedArgs: any): string {

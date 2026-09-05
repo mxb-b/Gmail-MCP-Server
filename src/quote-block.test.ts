@@ -19,6 +19,8 @@ import {
     buildPlainTextQuote,
     unwrapHtmlDocument,
     pickQuotableMessage,
+    plainTextToHtml,
+    formatQuoteDate,
 } from './utl.js';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -200,5 +202,90 @@ describe('index.ts auto-quote wiring', () => {
 
     it('filters drafts and trash out of the References chain', () => {
         expect(source).toMatch(/labels\.includes\('DRAFT'\) && !labels\.includes\('TRASH'\)/);
+    });
+});
+
+describe('Gmail-native structure (reference: "Re: heading over", 2026-09-03)', () => {
+    // The reference is a reply Jordan typed in the Gmail web composer. Its HTML
+    // part, decoded from quoted-printable, is:
+    //
+    //   <div dir="ltr"><div>Sounds good :)</div>...<br></div>
+    //   <br>
+    //   <div class="gmail_quote gmail_quote_container">
+    //     <div dir="ltr" class="gmail_attr">On Thu, Sep 3, 2026 at 2:12<U+202F>PM
+    //       Gregory Tolwinski, Brookline Music School &lt;<a
+    //       href="mailto:gtolwinski@bmsmusic.org">gtolwinski@bmsmusic.org</a>&gt;
+    //       wrote:<br></div>
+    //     <blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;
+    //       border-left:1px solid rgb(204,204,204);padding-left:1ex">
+    //       <div dir="ltr">...the sender's original HTML, nested markup intact...
+    //     </blockquote>
+    //   </div>
+    const date = 'Thu, 3 Sep 2026 14:12:00 -0400';
+    const from = 'Gregory Tolwinski, Brookline Music School <gtolwinski@bmsmusic.org>';
+
+    it('opens the quote with Gmail\'s exact container and attribution markup', () => {
+        const q = buildHtmlQuote(from, date, '<div dir="ltr">Hi</div>', 'Hi');
+        expect(q).toContain(
+            '<div class="gmail_quote gmail_quote_container">' +
+            '<div dir="ltr" class="gmail_attr">On Thu, Sep 3, 2026 at 2:12 PM ' +
+            'Gregory Tolwinski, Brookline Music School ' +
+            '&lt;<a href="mailto:gtolwinski@bmsmusic.org">gtolwinski@bmsmusic.org</a>&gt; wrote:<br></div>'
+        );
+    });
+
+    it('uses Gmail\'s exact blockquote element and inline style', () => {
+        const q = buildHtmlQuote(from, date, '<div dir="ltr">Hi</div>', 'Hi');
+        expect(q).toContain(
+            '<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;' +
+            'border-left:1px solid rgb(204,204,204);padding-left:1ex">'
+        );
+    });
+
+    it('separates the reply body from the quote with a <br>, as Gmail does', () => {
+        expect(buildHtmlQuote(from, date, '<div>Hi</div>', 'Hi').startsWith('<br><div class="gmail_quote')).toBe(true);
+    });
+
+    it('uses the narrow no-break space before AM/PM that Gmail emits', () => {
+        // Gmail sends =E2=80=AF (U+202F) between the minutes and the meridiem.
+        expect(formatQuoteDate(date)).toBe('Thu, Sep 3, 2026 at 2:12 PM');
+    });
+
+    it('carries the quoted message\'s original HTML verbatim, nested quotes intact', () => {
+        const nested =
+            '<div dir="ltr">Reply text</div>' +
+            '<div class="gmail_quote gmail_quote_container">' +
+            '<div dir="ltr" class="gmail_attr">On earlier date someone wrote:<br></div>' +
+            '<blockquote class="gmail_quote" style="margin:0px 0px 0px 0.8ex;border-left:1px solid rgb(204,204,204);padding-left:1ex">' +
+            '<div>older message</div></blockquote></div>';
+        const q = buildHtmlQuote(from, date, nested, 'ignored');
+        expect(q).toContain(nested);
+        // Not a plain-text rendering, and not escaped markup.
+        expect(q).not.toContain('&gt; older message');
+        expect(q).not.toContain('&lt;div');
+    });
+
+    it('renders a plain-text reply body as Gmail-native divs, not styled <p>', () => {
+        const html = plainTextToHtml('Hi there,\n\nThanks!\nJordan');
+        expect(html).toBe(
+            '<div dir="ltr"><div>Hi there,</div><div><br></div><div>Thanks!</div><div>Jordan</div></div>'
+        );
+    });
+
+    it('no longer forces a sans-serif override onto the reply or the quote', () => {
+        const html = plainTextToHtml('Hi');
+        expect(html).not.toContain('font-family');
+        expect(html).not.toContain('<html>');
+        expect(html).not.toContain('<p style=');
+    });
+
+    it('escapes the reply body but leaves the quoted HTML alone', () => {
+        expect(plainTextToHtml('a & b <c>')).toContain('a &amp; b &lt;c&gt;');
+    });
+
+    it('nests plain-text quote levels one deeper each time, as Gmail does', () => {
+        const inner = buildPlainTextQuote('A <a@b.com>', date, 'original');
+        const outer = buildPlainTextQuote('B <b@c.com>', date, 'reply' + inner);
+        expect(outer).toContain('> > original');
     });
 });
