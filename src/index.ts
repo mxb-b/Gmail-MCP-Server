@@ -483,25 +483,25 @@ async function main() {
                                 // skipped whenever htmlBody was absent, which is the normal
                                 // plain-text caller, so the HTML alternative ended up as
                                 // escaped "&gt;" lines instead of a real quote block.
-                                if (validatedArgs.mimeType !== 'text/plain') {
-                                    if (!validatedArgs.htmlBody) {
-                                        validatedArgs.htmlBody = isHtml(replyBodyBeforeQuote)
-                                            ? replyBodyBeforeQuote
-                                            : plainTextToHtml(replyBodyBeforeQuote);
-                                        // createEmailMessage only upgrades to multipart when
-                                        // htmlBody is absent, so say so explicitly now.
-                                        validatedArgs.mimeType = 'multipart/alternative';
-                                    }
-                                    const htmlQuote = buildHtmlQuote(quotedFrom, quotedDate, quotedHtml, textBody);
-                                    if (/<\/body>\s*<\/html>\s*$/i.test(validatedArgs.htmlBody)) {
-                                        validatedArgs.htmlBody = validatedArgs.htmlBody.replace(
-                                            /<\/body>\s*<\/html>\s*$/i,
-                                            htmlQuote + '</body></html>'
-                                        );
-                                    } else {
-                                        validatedArgs.htmlBody = validatedArgs.htmlBody + htmlQuote;
-                                    }
+                                if (!validatedArgs.htmlBody) {
+                                    validatedArgs.htmlBody = isHtml(replyBodyBeforeQuote)
+                                        ? replyBodyBeforeQuote
+                                        : plainTextToHtml(replyBodyBeforeQuote);
                                 }
+                                const htmlQuote = buildHtmlQuote(quotedFrom, quotedDate, quotedHtml, textBody);
+                                if (/<\/body>\s*<\/html>\s*$/i.test(validatedArgs.htmlBody)) {
+                                    validatedArgs.htmlBody = validatedArgs.htmlBody.replace(
+                                        /<\/body>\s*<\/html>\s*$/i,
+                                        htmlQuote + '</body></html>'
+                                    );
+                                } else {
+                                    validatedArgs.htmlBody = validatedArgs.htmlBody + htmlQuote;
+                                }
+                                // createEmailMessage only auto-upgrades to multipart when
+                                // htmlBody is ABSENT, and the tool schema defaults mimeType
+                                // to "text/plain", so leaving it alone here would drop the
+                                // HTML part we just built. Say multipart explicitly.
+                                validatedArgs.mimeType = 'multipart/alternative';
                             }
                         }
                     } catch (quoteError: any) {

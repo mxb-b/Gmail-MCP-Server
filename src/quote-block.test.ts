@@ -188,6 +188,16 @@ describe('index.ts auto-quote wiring', () => {
         expect(source).toContain('buildPlainTextQuote(quotedFrom, quotedDate, textBody)');
     });
 
+    it('forces multipart so the HTML quote is not dropped', () => {
+        // The tool schema defaults mimeType to "text/plain", so the quote path
+        // must set multipart itself or createEmailMessage emits text only.
+        expect(source).toContain("validatedArgs.mimeType = 'multipart/alternative';");
+    });
+
+    it('always builds an HTML quote, not only when htmlBody was supplied', () => {
+        expect(source).not.toContain("if (validatedArgs.mimeType !== 'text/plain') {");
+    });
+
     it('filters drafts and trash out of the References chain', () => {
         expect(source).toMatch(/labels\.includes\('DRAFT'\) && !labels\.includes\('TRASH'\)/);
     });
